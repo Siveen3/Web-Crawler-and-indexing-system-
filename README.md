@@ -1,6 +1,6 @@
 # Distributed Web Crawling and Indexing System
 
-This project is a cloud-based distributed web crawling and indexing system developed as part of the CSE354: Distributed Computing course at Ain Shams University, Faculty of Engineering (Spring 2025).
+This project is a cloud-based distributed web crawling and indexing system 
 
 ## Overview
 
