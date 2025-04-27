@@ -81,13 +81,17 @@ def indexer_process():
 
     sqs_content = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
     sqs_search = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
+    sqs_response = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key') #becouse we are using woosh
 
     content_queue_url = 'your-content-queue-url'
     search_queue_url = 'your-search-queue-url'
 
+    logging.info("Indexer node started and waiting for messages...")
+    
     while True:
         
         # --- 1. Check for new content to index ---
+     try:
         response_content = sqs_content.receive_message(
             QueueUrl=content_queue_url,
             MaxNumberOfMessages=1,
@@ -95,6 +99,8 @@ def indexer_process():
         )
         
         messages_content = response_content.get('Messages', [])
+     except Exception as e:
+        logging.error(f"Error receiving from content queue: {e}")
 
         if messages_content:
 
@@ -102,37 +108,51 @@ def indexer_process():
             body = json.loads(message['Body'])
             receipt_handle = message['ReceiptHandle']
 
+            content_to_index = body.get('content')
+            url = body.get('url')
+            title = body.get('title')
+            timestamp = body.get('timestamp')
 
-            logging.info(f"Indexer received content from Crawler {source_rank} to index.")
-
-        try:
             
-            with ix.writer() as writer:
-                writer.add_document(
-                    url=content_to_index['url'],
-                    title=content_to_index['title'],
-                    content=preprocessing(content_to_index['content']),
-                    timestamp=content_to_index['timestamp']
-                )
+
+            # logging.info(f"Indexer received content from Crawler {source_rank} to index.")
+            if content_to_index and url:
+              try:
+            
+                with ix.writer() as writer:
+                    writer.add_document(
+                        url=content_to_index['url'],
+                        title=content_to_index['title'],
+                        content=preprocessing(content_to_index['content']),
+                        timestamp=content_to_index['timestamp']
+                    )
 
 
-            logging.info(f"Indexer {rank} indexed content from Crawler {source_rank}.")
-            #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
-        except Exception as e:
-            logging.error(f"Indexer {rank} error indexing content from Crawler {source_rank}: {e}")
-            #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
-    
+                logging.info(f"Successfully indexed content for URL: {url}")                #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
+              except Exception as e:
+                logging.error(f"Error indexing content for URL {url}: {e}")                #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
+        
 
-        sqs_content.delete_message(QueueUrl=content_queue_url, ReceiptHandle=receipt_handle)
+            try:
+                # Delete the processed message from queue
+                sqs_content.delete_message(QueueUrl=content_queue_url, ReceiptHandle=receipt_handle)
+                logging.info(f"Deleted content message for URL: {url}")
+            except Exception as e:
+                logging.error(f"Error deleting message from content queue: {e}")
+
        
  # --- 2. Check for search requests ---
-        response_search = sqs_search.receive_message(
-            QueueUrl=search_queue_url,
-            MaxNumberOfMessages=1,
-            WaitTimeSeconds=2
-        )
+        try: 
+            response_search = sqs_search.receive_message(
+                QueueUrl=search_queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=2
+            )
 
-        messages_search = response_search.get('Messages', [])
+            messages_search = response_search.get('Messages', [])
+        except Exception as e:
+            logging.error(f"Error receiving from search queue: {e}")
+        
         if messages_search:
             message = messages_search[0]
             body = json.loads(message['Body'])
@@ -144,18 +164,26 @@ def indexer_process():
 
             if query and response_queue:
                 # Perform the search
-                results = search_index(ix, query)
+                try:
+                    results = search_index(ix, query)
 
-                # Send the search results back to the provided queue
-                sqs_response = boto3.client('sqs')
-                sqs_response.send_message(
-                    QueueUrl=response_queue,
-                    MessageBody=json.dumps(results)
-                )
+                    # Send the search results back to the provided queue
+                    sqs_response = boto3.client('sqs')
+                    sqs_response.send_message(
+                        QueueUrl=response_queue,
+                        MessageBody=json.dumps(results)
+                    )
 
-                logging.info(f"Processed search query: {query}")
+                    logging.info(f"Processed search query: {query}")
+                except Exception as e:
+                    logging.error(f"Error processing search query: {e}")
 
-            sqs_search.delete_message(QueueUrl=search_queue_url, ReceiptHandle=receipt_handle)
+                
+            try:
+                sqs_search.delete_message(QueueUrl=search_queue_url, ReceiptHandle=receipt_handle)
+                logging.info(f"Deleted search message for query: {query}")
+            except Exception as e:
+                logging.error(f"Error deleting message from search queue: {e}")
 
         # --- 3. Sleep if no activity ---
         if not messages_content and not messages_search:
@@ -164,4 +192,3 @@ def indexer_process():
 
 if __name__ == '__main__':
     indexer_process()
-
