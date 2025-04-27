@@ -74,28 +74,14 @@ def search_index(ix, query_str):
         ]
         
         return search_results
-
 def indexer_process():
-
-    ix = initialize_index()
-
-    comm = MPI.COMM_WORLD
-    rank = comm.Get_rank()
-    size = comm.Get_size()
-
-    logging.info(f"Indexer node started with rank {rank} of {size}")
-
-
     while True:
-        status = MPI.Status()
-        content_to_index = comm.recv(source=MPI.ANY_SOURCE, tag=2, status=status) # Receive content from crawlers (tag 2)
-        source_rank = status.Get_source()
+        # Check content queue first
+        response = sqs_content.receive_message(...)
+        
+        if message for content:
 
-        if not content_to_index: # Could be a shutdown signal
-            logging.info(f"Indexer {rank} received shutdown signal.Exiting.")
-            break
-
-        logging.info(f"Indexer {rank} received content from Crawler {source_rank} to index.")
+            logging.info(f"Indexer {rank} received content from Crawler {source_rank} to index.")
 
         try:
             
@@ -108,24 +94,25 @@ def indexer_process():
                 )
 
 
-
-
-            time.sleep(1) # Simulate indexing delay
             logging.info(f"Indexer {rank} indexed content from Crawler {source_rank}.")
-            comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
+            #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
         except Exception as e:
             logging.error(f"Indexer {rank} error indexing content from Crawler {source_rank}: {e}")
-            comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
+            #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
     
 
-        # Handle search requests
-        search_request = comm.recv(source=MPI.ANY_SOURCE, tag=1)  # Receive search query (tag 1)
-        if search_request:
+
+        # Then check search queue
+        response = sqs_search.receive_message(...)
+        
+        if message for search:
             logging.info(f"Indexer {rank} received search query: {search_request}")
             search_results = search_index(ix, search_request)  # Perform search on the index
+            #comm.send(search_results, dest=0, tag=101)  # Send search results to master (tag 101)
 
-            # Send search results back to the master or requesting node
-            comm.send(search_results, dest=0, tag=101)  # Send search results to master (tag 101)
+        # Small sleep if nothing received
+        time.sleep(2)
+
 
 if __name__ == '__main__':
     indexer_process()
