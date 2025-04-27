@@ -10,7 +10,7 @@ REGION_NAME = 'us-east-1'
 CRAWL_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/138749495090/CrawlQueue'
 REPORT_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/138749495090/ReportQueue'
 DYNAMODB_TABLE_NAME = 'CrawlerHeartbeatTable'
-MAX_DEPTH = 2  # Client-provided maximum crawling depth
+MAX_DEPTH = 2  
 BATCH_SEED_URLS = [
     "http://siveen.com",
     "http://soso.com/about",
