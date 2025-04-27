@@ -1,4 +1,6 @@
-from mpi4py import MPI
+import boto3
+import json
+
 import time
 import logging
 import re
@@ -75,13 +77,33 @@ def search_index(ix, query_str):
         
         return search_results
 def indexer_process():
-    while True:
-        # Check content queue first
-        response = sqs_content.receive_message(...)
-        
-        if message for content:
+    ix = initialize_index()
 
-            logging.info(f"Indexer {rank} received content from Crawler {source_rank} to index.")
+    sqs_content = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
+    sqs_search = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
+
+    content_queue_url = 'your-content-queue-url'
+    search_queue_url = 'your-search-queue-url'
+
+    while True:
+        
+        # --- 1. Check for new content to index ---
+        response_content = sqs_content.receive_message(
+            QueueUrl=content_queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=2
+        )
+        
+        messages_content = response_content.get('Messages', [])
+
+        if messages_content:
+
+            message = messages_content[0]
+            body = json.loads(message['Body'])
+            receipt_handle = message['ReceiptHandle']
+
+
+            logging.info(f"Indexer received content from Crawler {source_rank} to index.")
 
         try:
             
@@ -101,17 +123,43 @@ def indexer_process():
             #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
     
 
+        sqs_content.delete_message(QueueUrl=content_queue_url, ReceiptHandle=receipt_handle)
+       
+ # --- 2. Check for search requests ---
+        response_search = sqs_search.receive_message(
+            QueueUrl=search_queue_url,
+            MaxNumberOfMessages=1,
+            WaitTimeSeconds=2
+        )
 
-        # Then check search queue
-        response = sqs_search.receive_message(...)
-        
-        if message for search:
-            logging.info(f"Indexer {rank} received search query: {search_request}")
-            search_results = search_index(ix, search_request)  # Perform search on the index
-            #comm.send(search_results, dest=0, tag=101)  # Send search results to master (tag 101)
+        messages_search = response_search.get('Messages', [])
+        if messages_search:
+            message = messages_search[0]
+            body = json.loads(message['Body'])
+            receipt_handle = message['ReceiptHandle']
 
-        # Small sleep if nothing received
-        time.sleep(2)
+            query = body.get('query')
+            response_queue = body.get('response_queue')
+
+
+            if query and response_queue:
+                # Perform the search
+                results = search_index(ix, query)
+
+                # Send the search results back to the provided queue
+                sqs_response = boto3.client('sqs')
+                sqs_response.send_message(
+                    QueueUrl=response_queue,
+                    MessageBody=json.dumps(results)
+                )
+
+                logging.info(f"Processed search query: {query}")
+
+            sqs_search.delete_message(QueueUrl=search_queue_url, ReceiptHandle=receipt_handle)
+
+        # --- 3. Sleep if no activity ---
+        if not messages_content and not messages_search:
+            time.sleep(2)
 
 
 if __name__ == '__main__':
