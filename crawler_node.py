@@ -44,7 +44,7 @@ class Crawler:
             Item={
                 'crawler_id': self.crawler_id,
                 'status': 'running',
-                'timestamp': datetime.now(timezone.utc).isoformat()
+                'last_heartbeat': datetime.now(timezone.utc).isoformat()
             }
         )
         logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {time.time()}")
