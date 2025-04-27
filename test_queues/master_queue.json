@@ -1,0 +1,11 @@
+[
+    {
+        "type": "crawl_result",
+        "crawled_url": "https://example.com",
+        "extracted_links": [
+            "https://www.iana.org/domains/example"
+        ],
+        "status": "success",
+        "error": null
+    }
+]
