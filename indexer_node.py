@@ -26,8 +26,7 @@ index_dir = "index_dir"
 schema = Schema(
     url=ID(stored=True, unique=True),
     title=TEXT(stored=True),
-    content=TEXT(stored=True),
-    timestamp=DATETIME(stored=True)
+    content=TEXT(stored=True)
 )
 
 
@@ -71,7 +70,7 @@ def search_index(ix, query_str):
 
         # Return results as a list of dictionaries
         search_results = [
-            {"url": result["url"], "title": result["title"], "content": result["content"], "timestamp": result["timestamp"]}
+            {"url": result["url"], "title": result["title"], "content": result["content"]}
             for result in results
         ]
         
@@ -81,7 +80,7 @@ def indexer_process():
 
     sqs_content = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
     sqs_search = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
-    sqs_response = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key') #becouse we are using woosh
+    sqs_response = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
 
     content_queue_url = 'your-content-queue-url'
     search_queue_url = 'your-search-queue-url'
@@ -91,16 +90,16 @@ def indexer_process():
     while True:
         
         # --- 1. Check for new content to index ---
-     try:
-        response_content = sqs_content.receive_message(
-            QueueUrl=content_queue_url,
-            MaxNumberOfMessages=1,
-            WaitTimeSeconds=2
-        )
-        
-        messages_content = response_content.get('Messages', [])
-     except Exception as e:
-        logging.error(f"Error receiving from content queue: {e}")
+        try:
+            response_content = sqs_content.receive_message(
+                QueueUrl=content_queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=2
+            )
+            
+            messages_content = response_content.get('Messages', [])
+        except Exception as e:
+            logging.error(f"Error receiving from content queue: {e}")
 
         if messages_content:
 
@@ -109,34 +108,33 @@ def indexer_process():
             receipt_handle = message['ReceiptHandle']
 
             content_to_index = body.get('content')
-            url = body.get('url')
-            title = body.get('title')
+            url_recv = body.get('url')
+            title_recv = body.get('title')
             timestamp = body.get('timestamp')
 
             
 
             # logging.info(f"Indexer received content from Crawler {source_rank} to index.")
-            if content_to_index and url:
-              try:
-            
-                with ix.writer() as writer:
-                    writer.add_document(
-                        url=content_to_index['url'],
-                        title=content_to_index['title'],
-                        content=preprocessing(content_to_index['content']),
-                        timestamp=content_to_index['timestamp']
-                    )
+            if content_to_index and url_recv:
+                try:
+                
+                    with ix.writer() as writer:
+                        writer.add_document(
+                            url= url_recv,
+                            title=title_recv,
+                            content=preprocessing(content_to_index)
+                        )
 
 
-                logging.info(f"Successfully indexed content for URL: {url}")                #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
-              except Exception as e:
-                logging.error(f"Error indexing content for URL {url}: {e}")                #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
+                    logging.info(f"Successfully indexed content for URL: {url_recv}")                #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
+                except Exception as e:
+                    logging.error(f"Error indexing content for URL {url_recv}: {e}")                #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
         
 
             try:
                 # Delete the processed message from queue
                 sqs_content.delete_message(QueueUrl=content_queue_url, ReceiptHandle=receipt_handle)
-                logging.info(f"Deleted content message for URL: {url}")
+                logging.info(f"Deleted content message for URL: {url_recv}")
             except Exception as e:
                 logging.error(f"Error deleting message from content queue: {e}")
 
@@ -168,7 +166,6 @@ def indexer_process():
                     results = search_index(ix, query)
 
                     # Send the search results back to the provided queue
-                    sqs_response = boto3.client('sqs')
                     sqs_response.send_message(
                         QueueUrl=response_queue,
                         MessageBody=json.dumps(results)
