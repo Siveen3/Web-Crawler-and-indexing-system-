@@ -13,7 +13,7 @@ class Crawler:
                  crawler_id,
                  crawler_queue, 
                  master_queue, 
-                 indexer_queue, 
+                 # indexer_queue, 
                  s3_bucket,
                  dynamodb_table,
                  region='us-east-1',
@@ -24,7 +24,7 @@ class Crawler:
         self.crawler_id = crawler_id
         self.crawler_queue = crawler_queue
         self.master_queue = master_queue
-        self.indexer_queue = indexer_queue
+       # self.indexer_queue = indexer_queue
         self.s3_bucket = s3_bucket
         self.dynamodb_table = dynamodb_table
         self.region = region
