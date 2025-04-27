@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 # CONFIGURATION
 REGION_NAME = 'us-east-1'
 CRAWL_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/138749495090/CrawlQueue'
-REPORT_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/138749495090/ReportQueue' 
+REPORT_QUEUE_URL = 'https://sqs.us-east-1.amazonaws.com/138749495090/ReportQueue'
 DYNAMODB_TABLE_NAME = 'CrawlerHeartbeatTable'
+MAX_DEPTH = 2  # Client-provided maximum crawling depth
 BATCH_SEED_URLS = [
     "http://siveen.com",
     "http://soso.com/about",
@@ -21,11 +22,11 @@ sqs = boto3.client('sqs', region_name=REGION_NAME)
 dynamodb = boto3.resource('dynamodb', region_name=REGION_NAME)
 heartbeat_table = dynamodb.Table(DYNAMODB_TABLE_NAME)
 
-def send_url_to_crawl_queue(url, depth=0, max_depth=2):
+def send_url_to_crawl_queue(url, depth=0):
     message = {
         "url": url,
         "depth": depth,
-        "max_depth": max_depth
+        "max_depth": MAX_DEPTH
     }
     response = sqs.send_message(
         QueueUrl=CRAWL_QUEUE_URL,
@@ -35,7 +36,7 @@ def send_url_to_crawl_queue(url, depth=0, max_depth=2):
 
 def submit_seed_urls(seed_urls):
     for url in seed_urls:
-        send_url_to_crawl_queue(url)
+        send_url_to_crawl_queue(url, depth=0)
 
 def monitor_crawl_queue():
     while True:
@@ -87,16 +88,23 @@ def monitor_crawler_reports():
         for message in messages:
             body = json.loads(message['Body'])
             crawler_id = body.get('crawler_id', 'unknown')
-            url = body.get('url', 'unknown')
+            crawled_url = body.get('crawled_url', 'unknown')
+            extracted_urls = body.get('extracted_urls', [])
+            depth = body.get('depth', 0)
             status = body.get('status', 'unknown')
-            reason = body.get('reason', '')
+            error = body.get('error', '')
 
             if status == 'success':
-                print(f"[{crawler_id}] Successfully crawled: {url}")
+                print(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
+                if depth < MAX_DEPTH:
+                    for url in extracted_urls:
+                        send_url_to_crawl_queue(url, depth=depth+1)
+                else:
+                    print(f"[{crawler_id}] Max depth reached for {crawled_url}. Not adding extracted URLs.")
             else:
-                print(f"[{crawler_id}] Failed crawling: {url} Reason: {reason}")
+                print(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
 
-            # Delete the message from queue
+            # Delete the report message after processing
             sqs.delete_message(
                 QueueUrl=REPORT_QUEUE_URL,
                 ReceiptHandle=message['ReceiptHandle']
