@@ -1,5 +1,6 @@
 import boto3
 import json
+import os
 
 import time
 import logging
@@ -31,10 +32,11 @@ schema = Schema(
 
 
 def initialize_index():
+    if not os.path.exists(index_dir):
+        os.makedirs(index_dir)  # Create the folder if it doesn't exist
     if exists_in(index_dir):
         return open_dir(index_dir)
     return create_in(index_dir, schema)
-    
 
 
 
