@@ -161,7 +161,7 @@ class Crawler:
                     #self.send_to_indexer(s3_key, url)
                     self.save_content_locally(url, text_content)
                 else:
-                    self.send_to_master(url, extracted_links=[], depth, status="failed", error="Failed to fetch")
+                    self.send_to_master(url, extracted_links=[], depth = depth, status="failed", error="Failed to fetch")
 
                 # Delete the processed message from queue
                 self.sqs.delete_message(
