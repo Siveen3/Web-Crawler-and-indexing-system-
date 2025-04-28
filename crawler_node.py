@@ -13,8 +13,8 @@ class Crawler:
                  crawler_id,
                  crawler_queue, 
                  master_queue, 
-                 indexer_queue, 
-                 s3_bucket,
+                 #indexer_queue, 
+                 #s3_bucket,
                  dynamodb_table,
                  region='us-east-1',
                  delay=1    # Politeness logic
@@ -24,8 +24,8 @@ class Crawler:
         self.crawler_id = crawler_id
         self.crawler_queue = crawler_queue
         self.master_queue = master_queue
-        self.indexer_queue = indexer_queue
-        self.s3_bucket = s3_bucket
+        #self.indexer_queue = indexer_queue
+        #self.s3_bucket = s3_bucket
         self.dynamodb_table = dynamodb_table
         self.region = region
         self.delay = delay
@@ -37,7 +37,8 @@ class Crawler:
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
 
         # Configure logging to show time, log level, and message
-        logging.basicConfig(filename='crawler_node.log', filemode='w', level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+        logging.basicConfig(filename='crawler_node.log', filemode='w', level=logging.INFO, 
+                            format='%(asctime)s [%(levelname)s] %(message)s')
 
     def heartbeat(self):
         self.heartbeat_table.put_item(
@@ -147,7 +148,7 @@ class Crawler:
                 receipt_handle = message['ReceiptHandle']
                 body = json.loads(message['Body'])
                 url = body.get('url')
-                depth = body.get('depth')
+                depth = body.get('depth', 0)
 
                 logging.info(f"Processing URL: {url}")
                 self.heartbeat()
@@ -161,7 +162,7 @@ class Crawler:
                     #self.send_to_indexer(s3_key, url)
                     self.save_content_locally(url, text_content)
                 else:
-                    self.send_to_master(url, extracted_links=[], status="failed", error="Failed to fetch")
+                    self.send_to_master(url, extracted_links=[], depth=depth, status="failed", error="Failed to fetch")
 
                 # Delete the processed message from queue
                 self.sqs.delete_message(
