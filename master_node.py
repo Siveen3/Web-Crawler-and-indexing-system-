@@ -34,6 +34,22 @@ def send_url_to_crawl_queue(url, depth=0):
     )
     print(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
 
+def send_shutdown_signal_to_crawlers():
+    print("[Master] Sending shutdown signals to crawlers...")
+
+    response = heartbeat_table.scan()
+    for item in response['Items']:
+        crawler_id = item['crawler_id']
+        shutdown_message = {
+            "shutdown": True,
+            "crawler_id": crawler_id
+        }
+        sqs.send_message(
+            QueueUrl=CRAWL_QUEUE_URL,
+            MessageBody=json.dumps(shutdown_message)
+        )
+        print(f"[Master] Sent shutdown signal to {crawler_id}")
+
 def submit_seed_urls(seed_urls):
     for url in seed_urls:
         send_url_to_crawl_queue(url, depth=0)
@@ -52,6 +68,7 @@ def monitor_crawl_queue():
 
         if num_messages == 0:
             print("[Master] CrawlQueue is empty. Crawling seems complete!")
+            send_shutdown_signal_to_crawlers()  # SEND SHUTDOWN when done
             break
 
         time.sleep(30)  # Check every 30 seconds
@@ -93,7 +110,8 @@ def monitor_crawler_reports():
             depth = body.get('depth', 0)
             status = body.get('status', 'unknown')
             error = body.get('error', '')
-
+            if depth = none:
+                depth = 0
             if status == 'success':
                 print(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
                 if depth < MAX_DEPTH:

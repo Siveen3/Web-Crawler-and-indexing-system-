@@ -1,4 +1,7 @@
-from mpi4py import MPI
+import boto3
+import json
+import os
+
 import time
 import logging
 import re
@@ -24,16 +27,16 @@ index_dir = "index_dir"
 schema = Schema(
     url=ID(stored=True, unique=True),
     title=TEXT(stored=True),
-    content=TEXT(stored=True),
-    timestamp=DATETIME(stored=True)
+    content=TEXT(stored=True)
 )
 
 
 def initialize_index():
+    if not os.path.exists(index_dir):
+        os.makedirs(index_dir)  # Create the folder if it doesn't exist
     if exists_in(index_dir):
         return open_dir(index_dir)
     return create_in(index_dir, schema)
-    
 
 
 
@@ -69,51 +72,122 @@ def search_index(ix, query_str):
 
         # Return results as a list of dictionaries
         search_results = [
-            {"url": result["url"], "title": result["title"], "content": result["content"], "timestamp": result["timestamp"]}
+            {"url": result["url"], "title": result["title"], "content": result["content"]}
             for result in results
         ]
         
         return search_results
 def indexer_process():
-    while True:
-        # Check content queue first
-        response = sqs_content.receive_message(...)
-        
-        if message for content:
+    ix = initialize_index()
 
-            logging.info(f"Indexer {rank} received content from Crawler {source_rank} to index.")
+    sqs_content = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
+    sqs_search = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
+    sqs_response = boto3.client('sqs', region_name='your-region', aws_access_key_id='your-access-key', aws_secret_access_key='your-secret-key')
 
-        try:
-            
-            with ix.writer() as writer:
-                writer.add_document(
-                    url=content_to_index['url'],
-                    title=content_to_index['title'],
-                    content=preprocessing(content_to_index['content']),
-                    timestamp=content_to_index['timestamp']
-                )
+    content_queue_url = 'your-content-queue-url'
+    search_queue_url = 'your-search-queue-url'
 
-
-            logging.info(f"Indexer {rank} indexed content from Crawler {source_rank}.")
-            #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
-        except Exception as e:
-            logging.error(f"Indexer {rank} error indexing content from Crawler {source_rank}: {e}")
-            #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
+    logging.info("Indexer node started and waiting for messages...")
     
-
-
-        # Then check search queue
-        response = sqs_search.receive_message(...)
+    while True:
         
-        if message for search:
-            logging.info(f"Indexer {rank} received search query: {search_request}")
-            search_results = search_index(ix, search_request)  # Perform search on the index
-            #comm.send(search_results, dest=0, tag=101)  # Send search results to master (tag 101)
+        # --- 1. Check for new content to index ---
+        try:
+            response_content = sqs_content.receive_message(
+                QueueUrl=content_queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=2
+            )
+            
+            messages_content = response_content.get('Messages', [])
+        except Exception as e:
+            logging.error(f"Error receiving from content queue: {e}")
 
-        # Small sleep if nothing received
-        time.sleep(2)
+        if messages_content:
+
+            message = messages_content[0]
+            body = json.loads(message['Body'])
+            receipt_handle = message['ReceiptHandle']
+
+            content_to_index = body.get('content')
+            url_recv = body.get('url')
+            title_recv = body.get('title')
+            timestamp = body.get('timestamp')
+
+            
+
+            # logging.info(f"Indexer received content from Crawler {source_rank} to index.")
+            if content_to_index and url_recv:
+                try:
+                
+                    with ix.writer() as writer:
+                        writer.add_document(
+                            url= url_recv,
+                            title=title_recv,
+                            content=preprocessing(content_to_index)
+                        )
+
+
+                    logging.info(f"Successfully indexed content for URL: {url_recv}")                #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
+                except Exception as e:
+                    logging.error(f"Error indexing content for URL {url_recv}: {e}")                #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
+        
+
+            try:
+                # Delete the processed message from queue
+                sqs_content.delete_message(QueueUrl=content_queue_url, ReceiptHandle=receipt_handle)
+                logging.info(f"Deleted content message for URL: {url_recv}")
+            except Exception as e:
+                logging.error(f"Error deleting message from content queue: {e}")
+
+       
+ # --- 2. Check for search requests ---
+        try: 
+            response_search = sqs_search.receive_message(
+                QueueUrl=search_queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=2
+            )
+
+            messages_search = response_search.get('Messages', [])
+        except Exception as e:
+            logging.error(f"Error receiving from search queue: {e}")
+        
+        if messages_search:
+            message = messages_search[0]
+            body = json.loads(message['Body'])
+            receipt_handle = message['ReceiptHandle']
+
+            query = body.get('query')
+            response_queue = body.get('response_queue')
+
+
+            if query and response_queue:
+                # Perform the search
+                try:
+                    results = search_index(ix, query)
+
+                    # Send the search results back to the provided queue
+                    sqs_response.send_message(
+                        QueueUrl=response_queue,
+                        MessageBody=json.dumps(results)
+                    )
+
+                    logging.info(f"Processed search query: {query}")
+                except Exception as e:
+                    logging.error(f"Error processing search query: {e}")
+
+                
+            try:
+                sqs_search.delete_message(QueueUrl=search_queue_url, ReceiptHandle=receipt_handle)
+                logging.info(f"Deleted search message for query: {query}")
+            except Exception as e:
+                logging.error(f"Error deleting message from search queue: {e}")
+
+        # --- 3. Sleep if no activity ---
+        if not messages_content and not messages_search:
+            time.sleep(2)
 
 
 if __name__ == '__main__':
     indexer_process()
-
