@@ -7,7 +7,6 @@ from elasticsearch import Elasticsearch
 
 
 class Indexer:
-    # NO DEFAULT VALUES
     def __init__(self, es_host, es_port, index_name, s3_bucket,	content_queue_url, 
                  search_queue_url, response_queue_url, region='us-east-1', delay=2):
 
@@ -57,7 +56,7 @@ class Indexer:
                 },
                 "mappings": {
                     "properties": {
-                        "url": {"type": "keyword", "copy_to": ["canonical_url"]},
+                        "url": {"type": "keyword"},
                         "title": {"type": "text", "analyzer": "english_analyzer"},
                         "content": {"type": "text", "analyzer": "english_analyzer"},
                         "meta_description": {"type": "text", "analyzer": "english_analyzer"}
@@ -88,7 +87,6 @@ class Indexer:
         except Exception as e:
             logging.error(f"Failed to index {url}: {e}")
 
-
     def read_from_s3(self, s3_key):
         try:
             response = self.s3.get_object(Bucket=self.s3_bucket, Key=s3_key)
@@ -98,7 +96,8 @@ class Indexer:
 
         except Exception as e:
             logging.error(f"Failed to read from S3: {e}")
-            return None
+            
+        return None
 
     def search_index(self, query_str):
         search_body = {
@@ -140,7 +139,6 @@ class Indexer:
             })
         return formatted
 
-
     def index_process(self):
         try:
             response_content = self.sqs_content.receive_message(
@@ -149,6 +147,8 @@ class Indexer:
                 WaitTimeSeconds=2
             )
             message_content = response_content.get('Messages', [])
+            if not message_content:
+                logging.debug("Content queue is empty.")
         except Exception as e:
             logging.error(f"Error receiving from content queue: {e}")
             message_content = []
@@ -216,7 +216,7 @@ class Indexer:
                     
                     # Send results back
                     self.sqs_response.send_message(
-                        QueueUrl=response_queue_url,
+                        QueueUrl=self.response_queue_url,
                         MessageBody=json.dumps(results)
                     )
                     
@@ -233,12 +233,9 @@ class Indexer:
                 except Exception as e:
                     logging.error(f"Error deleting message from search queue: {e}")
 
-
-
     def start_indexing(self):
         logging.info("Indexer started. Waiting for SQS messages...")
         while True:
             self.index_process()
             self.search_process()
             time.sleep(self.delay)
-        
