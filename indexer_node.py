@@ -1,42 +1,135 @@
 import boto3
 import json
 import os
-
 import time
 import logging
 import re
 import nltk
+from elasticsearch import Elasticsearch, helpers
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
 
-from whoosh.index import create_in, open_dir, exists_in
-from whoosh.fields import Schema, ID, TEXT, DATETIME
-from whoosh.qparser import QueryParser
 
 nltk.download('stopwords')
 nltk.download('wordnet')
 nltk.download('omw-1.4')
 
-from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
 
 STOPWORDS = set(stopwords.words('english'))
 lemmatizer = WordNetLemmatizer()
 
-
-index_dir = "index_dir"
-
-schema = Schema(
-    url=ID(stored=True, unique=True),
-    title=TEXT(stored=True),
-    content=TEXT(stored=True)
-)
+# Elasticsearch configuration
+ES_HOST = "localhost"  # need to be replaced with  Elasticsearch cluster endpoint !!!!
+ES_PORT = 9200
+ES_INDEX_NAME = "web_content"  #insted of (index_dir = "index_dir" )     , Defines where or how the index is stored 
 
 
-def initialize_index():
-    if not os.path.exists(index_dir):
-        os.makedirs(index_dir)  # Create the folder if it doesn't exist
-    if exists_in(index_dir):
-        return open_dir(index_dir)
-    return create_in(index_dir, schema)
+
+
+#Whoosh Schema definition "no need now"
+
+# schema = Schema(
+#     url=ID(stored=True, unique=True),   
+#     title=TEXT(stored=True),
+#     content=TEXT(stored=True)
+# )
+
+def initialize_elasticsearch():
+    """Initialize connection to Elasticsearch and create index with enhanced schema"""
+    es = Elasticsearch([{'host': ES_HOST, 'port': ES_PORT}])
+    
+    #  filds :  url, canonical_url, title, content, meta_description, keywords, language, timestamp, is_canonical
+    # Create index if it doesn't exist with enhanced schema  ,
+    if not es.indices.exists(index=ES_INDEX_NAME):
+        index_settings = {
+            "settings": {
+                "number_of_shards": 1,
+                "number_of_replicas": 0,
+                "analysis": {
+                    "filter": {
+                        "english_stop": {
+                            "type": "stop",
+                            "stopwords": "_english_"
+                        },
+                        "english_stemmer": {
+                            "type": "stemmer",
+                            "language": "english"
+                        },
+                        "english_possessive_stemmer": {
+                            "type": "stemmer",
+                            "language": "possessive_english"
+                        }
+                    },
+                    "analyzer": {
+                        "english_analyzer": {
+                            "tokenizer": "standard",
+                            "filter": [
+                                "english_possessive_stemmer",
+                                "lowercase",
+                                "english_stop",
+                                "english_stemmer"
+                            ]
+                        }
+                    }
+                }
+            },
+            "mappings": {
+                "properties": {
+                    "url": {
+                        "type": "keyword",
+                        "copy_to": ["canonical_url"]  # Copy URL to canonical_url if no canonical URL is provided
+                    },
+                    "canonical_url": {
+                        "type": "keyword",
+                        "doc_values": True
+                    },
+                    "title": {
+                        "type": "text",
+                        "analyzer": "english_analyzer",
+                        "fields": {
+                            "keyword": {
+                                "type": "keyword"
+                            }
+                        }
+                    },
+                    "content": {
+                        "type": "text",
+                        "analyzer": "english_analyzer"
+                    },
+                    "meta_description": {
+                        "type": "text",
+                        "analyzer": "english_analyzer"
+                    },
+                    "keywords": {
+                        "type": "keyword"
+                    },
+                    "language": {
+                        "type": "keyword"
+                    },
+                    "timestamp": {
+                        "type": "date"
+                    },
+                    "is_canonical": {
+                        "type": "boolean"
+                    }
+                }
+            }
+        }
+        es.indices.create(index=ES_INDEX_NAME, body=index_settings)
+        logging.info(f"Created Elasticsearch index: {ES_INDEX_NAME} with enhanced schema")
+    
+    return es
+
+
+
+
+
+# def initialize_index():
+#     if not os.path.exists(index_dir):
+#         os.makedirs(index_dir)  # Create the folder if it doesn't exist
+#     if exists_in(index_dir):
+#         return open_dir(index_dir)
+#     return create_in(index_dir, schema)
 
 
 
