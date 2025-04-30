@@ -1,3 +1,9 @@
 test_crawler.py
 crawler_node.log
 test.py
+
+__pycache__/
+crawled_content/
+index_dir/
+index_directory/
+test_queues/
