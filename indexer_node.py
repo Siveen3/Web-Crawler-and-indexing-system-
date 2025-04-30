@@ -8,8 +8,8 @@ from elasticsearch import Elasticsearch
 
 class Indexer:
     # NO DEFAULT VALUES
-    def __init__(self, es_host, es_port, index_name, aws_key, aws_secret, s3_bucket,
-                 content_queue_url, search_queue_url, region='us-east-1', delay=2):
+    def __init__(self, es_host, es_port, index_name, s3_bucket,	content_queue_url, 
+                 search_queue_url, response_queue_url, region='us-east-1', delay=2):
 
         self.es_host = es_host
         self.es_port = es_port
@@ -18,19 +18,18 @@ class Indexer:
         self.region = region
 
         self.s3_bucket = s3_bucket
-        self.aws_key = aws_key
-        self.aws_secret = aws_secret
         self.content_queue_url = content_queue_url
         self.search_queue_url = search_queue_url
-
+        self.response_queue_url = response_queue_url
+        
         # Initialize Elasticsearch
         self.es = self.initialize_elasticsearch()
         
         # Initialize clients
-        self.sqs_content = boto3.client('sqs', region_name=region, aws_access_key_id=aws_key, aws_secret_access_key=aws_secret)
-        self.sqs_search = boto3.client('sqs', region_name=region, aws_access_key_id=aws_key, aws_secret_access_key=aws_secret)
-        self.sqs_response = boto3.client('sqs', region_name=region, aws_access_key_id=aws_key, aws_secret_access_key=aws_secret)
-        self.s3 = boto3.client('s3', region_name=region, aws_access_key_id=aws_key, aws_secret_access_key=aws_secret)
+        self.sqs_content = boto3.client('sqs', region_name=region)
+        self.sqs_search = boto3.client('sqs', region_name=region)
+        self.sqs_response = boto3.client('sqs', region_name=region)
+        self.s3 = boto3.client('s3', region_name=region)
 
         # Configure logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - Indexer - %(levelname)s - %(message)s')
@@ -217,7 +216,7 @@ class Indexer:
                     
                     # Send results back
                     self.sqs_response.send_message(
-                        QueueUrl=response_queue,
+                        QueueUrl=response_queue_url,
                         MessageBody=json.dumps(results)
                     )
                     
