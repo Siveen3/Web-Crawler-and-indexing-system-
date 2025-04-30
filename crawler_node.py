@@ -53,6 +53,13 @@ class Crawler:
 
     def handle_shutdown(self, signum, frame):
         logging.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
+        self.send_to_master(
+            url="",
+            extracted_links=[],
+            depth=-1,
+            status="shutdown",
+            error="Crawler is about to shut down due to manual request"
+        )
         self.shutdown_requested = True
 
 
@@ -139,6 +146,10 @@ class Crawler:
 
     def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content):
         # Upload extracted text content to S3.
+        
+        # TRY - EXCEPT
+        
+        
         s3_key = f"crawled_content/{hash(url)}.json"
         content = {
             "url": url,
@@ -169,11 +180,10 @@ class Crawler:
         logging.info(f"Saved content locally at: {filename}")
         return filename
 
-    def send_to_indexer(self, s3_key, url, title):
+    def send_to_indexer(self, s3_key, url):
         # Send S3 info to indexer queue.
         message = {
             "url": url,
-            "title": title,
             "s3_key": s3_key
         }
 
@@ -205,6 +215,7 @@ class Crawler:
 
             # Process each URL in the queue.
             for message in messages:
+                # NO NEED FOR LOOP
                 if self.shutdown_requested:
                     logging.info("Shutdown requested. Exiting during message processing.")
                     break
@@ -234,11 +245,12 @@ class Crawler:
                         self.send_to_master(url, extracted_links, depth, status="success")
                         logging.info(f"Reported successful URL to master: {url}")
                         s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content)
-                        self.send_to_indexer(s3_key, url, title)
+                        self.send_to_indexer(s3_key, url)
                         self.save_content_locally(url, title, meta_description, canonical_url, text_content)
                     else:
                         self.send_to_master(url, extracted_links=[], depth=depth, status="failed", error="Failed to fetch")
                         logging.info(f"Reported failed URL to master: {url}")
+                        continue
 
 
                 # Delete the processed message from queue
@@ -246,6 +258,7 @@ class Crawler:
                     QueueUrl=self.crawler_queue,
                     ReceiptHandle=receipt_handle
                 )
+                # TRY-EXCEPT
 
                 logging.info(f"Deleted message from crawler queue for URL: {url}")
 
