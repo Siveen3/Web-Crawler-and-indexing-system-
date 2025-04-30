@@ -112,11 +112,9 @@ def indexer_process():
             content_to_index = body.get('content')
             url_recv = body.get('url')
             title_recv = body.get('title')
-            timestamp = body.get('timestamp')
 
             
 
-            # logging.info(f"Indexer received content from Crawler {source_rank} to index.")
             if content_to_index and url_recv:
                 try:
                 
@@ -128,9 +126,9 @@ def indexer_process():
                         )
 
 
-                    logging.info(f"Successfully indexed content for URL: {url_recv}")                #comm.send(f"Indexer {rank} - Indexed content from Crawler {source_rank}", dest=0, tag=99) # Send status update to master (tag 99)
+                    logging.info(f"Successfully indexed content for URL: {url_recv}")           
                 except Exception as e:
-                    logging.error(f"Error indexing content for URL {url_recv}: {e}")                #comm.send(f"Indexer {rank} - Error indexing: {e}", dest=0, tag=999) # Report error to master (tag 999)
+                    logging.error(f"Error indexing content for URL {url_recv}: {e}")                
         
 
             try:
