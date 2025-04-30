@@ -7,13 +7,18 @@ from urllib.parse import urljoin
 import logging
 from datetime import datetime, timezone
 import os       #temporary until we have a real S3 bucket or whatever we need to do :) 
+import urllib.robotparser
+from urllib.parse import urlparse
+import signal
+import sys
+
 
 class Crawler:
     def __init__(self, 
                  crawler_id,
                  crawler_queue, 
                  master_queue, 
-                 # indexer_queue, 
+                 indexer_queue, 
                  s3_bucket,
                  dynamodb_table,
                  region='us-east-1',
@@ -24,7 +29,7 @@ class Crawler:
         self.crawler_id = crawler_id
         self.crawler_queue = crawler_queue
         self.master_queue = master_queue
-       # self.indexer_queue = indexer_queue
+        self.indexer_queue = indexer_queue
         self.s3_bucket = s3_bucket
         self.dynamodb_table = dynamodb_table
         self.region = region
@@ -37,39 +42,87 @@ class Crawler:
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
 
         # Configure logging to show time, log level, and message
-        logging.basicConfig(filename='crawler_node.log', filemode='w', level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+        logging.basicConfig(filename='crawler_node.log', filemode='w', level=logging.INFO, 
+                            format='%(asctime)s [%(levelname)s] %(message)s')
+        
+        # Handle graceful shutdown
+        self.shutdown_requested = False
+        signal.signal(signal.SIGINT, self.handle_shutdown)
+        signal.signal(signal.SIGTERM, self.handle_shutdown)
+
+
+    def handle_shutdown(self, signum, frame):
+        logging.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
+        self.shutdown_requested = True
+
 
     def heartbeat(self):
-        self.heartbeat_table.put_item(
-            Item={
-                'crawler_id': self.crawler_id,
-                'status': 'running',
-                'last_heartbeat': datetime.now(timezone.utc).isoformat()
-            }
-        )
-        logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {time.time()}")
-
-    def fetch_url(self, url):
         try:
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            return response.text
+            self.heartbeat_table.put_item(
+                Item={
+                    'crawler_id': self.crawler_id,
+                    'status': 'running',
+                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
+                }
+            )
+            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {time.time()}")
+        
         except Exception as e:
-            logging.error(f"Failed to fetch {url}: {e}")
-            return None
+            logging.error(f"Failed to send heartbeat: {e}")
+
+    def is_allowed_by_robots(self, url):
+        parsed = urlparse(url)
+        robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
+
+        rp = urllib.robotparser.RobotFileParser()
+        rp.set_url(robots_url)
+        try:
+            rp.read()
+            return rp.can_fetch("*", url)   # returns True if the URL is allowed by robots.txt
+        except:
+            logging.warning(f"Error reading robots.txt for URL: {url}")
+            return True
+
+    def fetch_url(self, url, max_retries=3, backoff=2):
+        # backoff: wait time in seconds between retries.
+        logging.info(f"Starting fetch attempt for URL: {url}")
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                logging.info(f"Fetching attempt {attempt} for URL: {url}")
+                response = requests.get(url, timeout=10)
+                response.raise_for_status()
+                logging.info(f"Successfully fetched URL: {url} (Status: {response.status_code})")
+                return response.text
+            except Exception as e:
+                logging.warning(f"Error fetching URL: {url} | Error: {str(e)}")
+                logging.warning(f"Attempt {attempt} failed. {3-attempt} attempts remaining.")
+                if attempt < max_retries:
+                    time.sleep(backoff)
+                else:
+                    logging.error(f"All {max_retries} attempts failed to fetch URL: {url}")
+                    return None
+
 
     def extract_content_and_links(self, html_content, base_url):
-        # Extract text and absolute URLs from HTML content.
+        # Extracts the title, text content, meta description, canonical URL, and all links from the HTML content.
         soup = BeautifulSoup(html_content, 'html.parser')
+        title = soup.title.string.strip() if soup.title and soup.title.string else "Untitled"
         text_content = soup.get_text(separator=' ', strip=True)
+        meta_tag = soup.find("meta", attrs={"name": "description"})
+        meta_description = meta_tag["content"].strip() if meta_tag and meta_tag.get("content") else ""
+        canonical_tag = soup.find("link", rel="canonical")
+        canonical_url = canonical_tag["href"].strip() if canonical_tag and canonical_tag.get("href") else base_url
         links = [urljoin(base_url, a['href']) for a in soup.find_all('a', href=True)]
-        return text_content, links
+        logging.info(f"Extracted {len(links)} links from URL: {base_url}")
+        return title, text_content, meta_description, canonical_url, links
 
-    def send_to_master(self, crawled_url, extracted_links, depth, status, error=None):
+
+    def send_to_master(self, url, extracted_links, depth, status, error=None):
         # Send crawl results (links and status) to the master queue.
         message = {
             "crawler_id": self.crawler_id,
-            "crawled_url": crawled_url,
+            "url": url,
             "extracted_urls": extracted_links,
             "depth": depth,
             "status": status,
@@ -82,28 +135,32 @@ class Crawler:
             MessageBody=json.dumps(message)
         )
 
-        logging.info(f"Reported crawl result to master for URL: {crawled_url}")
+        logging.info(f"Reported crawl result to master for URL: {url}")
 
-    def upload_content_to_s3(self, document_url, text_content):
+    def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content):
         # Upload extracted text content to S3.
-        s3_key = f"crawled_content/{hash(document_url)}.json"
+        s3_key = f"crawled_content/{hash(url)}.json"
         content = {
-            "document_url": document_url,
+            "url": url,
+            "title": title,
+            "meta_description": meta_description,
+            "canonical_url": canonical_url,
             "text_content": text_content
         }
-
         self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=json.dumps(content))
         logging.info(f"Uploaded content to S3: {s3_key}")
         return s3_key
 
-    def save_content_locally(self, document_url, text_content):
-        # Save extracted text content to a local file instead of S3 (for testing).
-        if not os.path.exists("crawled_content"):
-            os.makedirs("crawled_content")  # Create directory if it doesn't exist
+    def save_content_locally(self, url, title, meta_description, canonical_url, text_content):
+        # Save extracted text content to a local file instead of S3 (for testing).        
+        os.makedirs("crawled_content", exist_ok=True)  # Create directory if it doesn't exist
 
-        filename = f"crawled_content/{hash(document_url)}.json"
+        filename = f"crawled_content/{hash(url)}.json"
         content = {
-            "document_url": document_url,
+            "url": url,
+            "title": title,
+            "meta_description": meta_description,
+            "canonical_url": canonical_url,
             "text_content": text_content
         }
         with open(filename, "w", encoding="utf-8") as f:
@@ -112,11 +169,11 @@ class Crawler:
         logging.info(f"Saved content locally at: {filename}")
         return filename
 
-    def send_to_indexer(self, s3_key, document_url):
+    def send_to_indexer(self, s3_key, url, title):
         # Send S3 info to indexer queue.
         message = {
-            "url": document_url,
-            "title": "LESA HASHOF HANGEBAK EZAY",
+            "url": url,
+            "title": title,
             "s3_key": s3_key
         }
 
@@ -125,7 +182,7 @@ class Crawler:
             MessageBody=json.dumps(message)
         )
 
-        logging.info(f"Sent index data for URL: {document_url}")
+        logging.info(f"Sent index data for URL: {url}")
 
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
@@ -136,6 +193,10 @@ class Crawler:
                 WaitTimeSeconds=10
             )     
 
+            if self.shutdown_requested:
+                logging.info("Shutdown requested. Exiting before processing new messages.")
+                break
+
             messages = response.get('Messages', [])
             if not messages:
                 logging.info("Waiting for messages in crawler queue...")
@@ -144,24 +205,41 @@ class Crawler:
 
             # Process each URL in the queue.
             for message in messages:
+                if self.shutdown_requested:
+                    logging.info("Shutdown requested. Exiting during message processing.")
+                    break
+
+                logging.info(f"Processing message: {message}")
+
                 receipt_handle = message['ReceiptHandle']
                 body = json.loads(message['Body'])
                 url = body.get('url')
-                depth = body.get('depth')
+                depth = body.get('depth', 0)
 
                 logging.info(f"Processing URL: {url}")
                 self.heartbeat()
-                
-                html_content = self.fetch_url(url)
 
-                if html_content:
-                    text_content, extracted_links = self.extract_content_and_links(html_content, url)
-                    self.send_to_master(url, extracted_links, depth, status="success")
-                    #s3_key = self.upload_content_to_s3(url, text_content)
-                    #self.send_to_indexer(s3_key, url)
-                    self.save_content_locally(url, text_content)
+                if not self.is_allowed_by_robots(url):
+                    logging.warning(f"This URL is blocked by robots.txt: {url}")
+                    self.send_to_master(url, [], depth, status="skipped", error="robots.txt disallowed")
+                    logging.info(f"Reported blocked URL to master: {url}")
+
                 else:
-                    self.send_to_master(url, extracted_links=[], depth = depth, status="failed", error="Failed to fetch")
+                    html_content = self.fetch_url(url)
+
+                    if html_content:
+                        title, text_content, meta_description, canonical_url, extracted_links = self.extract_content_and_links(html_content, url)
+                        logging.info(f"Finished processing URL: {url}")
+
+                        self.send_to_master(url, extracted_links, depth, status="success")
+                        logging.info(f"Reported successful URL to master: {url}")
+                        s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content)
+                        self.send_to_indexer(s3_key, url, title)
+                        self.save_content_locally(url, title, meta_description, canonical_url, text_content)
+                    else:
+                        self.send_to_master(url, extracted_links=[], depth=depth, status="failed", error="Failed to fetch")
+                        logging.info(f"Reported failed URL to master: {url}")
+
 
                 # Delete the processed message from queue
                 self.sqs.delete_message(
@@ -169,7 +247,7 @@ class Crawler:
                     ReceiptHandle=receipt_handle
                 )
 
-                logging.info(f"Finished processing URL: {url}")
+                logging.info(f"Deleted message from crawler queue for URL: {url}")
 
                 time.sleep(self.delay)  # Respect delay to avoid hammering servers
 
