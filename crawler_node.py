@@ -6,19 +6,17 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import logging
 from datetime import datetime, timezone
-import os       #temporary until we have a real S3 bucket or whatever we need to do :) 
 import urllib.robotparser
 from urllib.parse import urlparse
 import signal
-import sys
 
 
 class Crawler:
     def __init__(self, 
                  crawler_id,
-                 crawler_queue, 
-                 master_queue, 
-                 indexer_queue, 
+                 crawler_queue_url, 
+                 master_queue_url, 
+                 indexer_queue_url, 
                  s3_bucket,
                  dynamodb_table,
                  region='us-east-1',
@@ -27,9 +25,9 @@ class Crawler:
 
         # Initialization of crawler node.
         self.crawler_id = crawler_id
-        self.crawler_queue = crawler_queue
-        self.master_queue = master_queue
-        self.indexer_queue = indexer_queue
+        self.crawler_queue_url = crawler_queue_url
+        self.master_queue_url = master_queue_url
+        self.indexer_queue_url = indexer_queue_url
         self.s3_bucket = s3_bucket
         self.dynamodb_table = dynamodb_table
         self.region = region
@@ -128,6 +126,7 @@ class Crawler:
     def send_to_master(self, url, extracted_links, depth, status, error=None):
         # Send crawl results (links and status) to the master queue.
         message = {
+            #
             "crawler_id": self.crawler_id,
             "url": url,
             "extracted_urls": extracted_links,
@@ -137,18 +136,19 @@ class Crawler:
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
-        self.sqs.send_message(
-            QueueUrl=self.master_queue,
-            MessageBody=json.dumps(message)
-        )
-
-        logging.info(f"Reported crawl result to master for URL: {url}")
+        try:
+            self.sqs.send_message(
+                QueueUrl=self.master_queue_url,
+                MessageBody=json.dumps(message)
+            )
+            logging.info(f"Reported crawl result to master for URL: {url}")
+        except Exception as e:
+            logging.error(f"Failed to report crawl result to master for URL: {url} | Error: {e}")
 
     def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content):
         # Upload extracted text content to S3.
         
         # TRY - EXCEPT
-        
         
         s3_key = f"crawled_content/{hash(url)}.json"
         content = {
@@ -158,27 +158,13 @@ class Crawler:
             "canonical_url": canonical_url,
             "text_content": text_content
         }
-        self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=json.dumps(content))
-        logging.info(f"Uploaded content to S3: {s3_key}")
-        return s3_key
-
-    def save_content_locally(self, url, title, meta_description, canonical_url, text_content):
-        # Save extracted text content to a local file instead of S3 (for testing).        
-        os.makedirs("crawled_content", exist_ok=True)  # Create directory if it doesn't exist
-
-        filename = f"crawled_content/{hash(url)}.json"
-        content = {
-            "url": url,
-            "title": title,
-            "meta_description": meta_description,
-            "canonical_url": canonical_url,
-            "text_content": text_content
-        }
-        with open(filename, "w", encoding="utf-8") as f:
-            json.dump(content, f, ensure_ascii=False, indent=4)
-
-        logging.info(f"Saved content locally at: {filename}")
-        return filename
+        try:
+            self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=json.dumps(content))
+            logging.info(f"Uploaded content to S3: {s3_key}")
+            return s3_key
+        except Exception as e:
+            logging.error(f"Failed to upload content to S3: {e}")
+            return None
 
     def send_to_indexer(self, s3_key, url):
         # Send S3 info to indexer queue.
@@ -186,22 +172,23 @@ class Crawler:
             "url": url,
             "s3_key": s3_key
         }
-
-        self.sqs.send_message(
-            QueueUrl=self.indexer_queue,
-            MessageBody=json.dumps(message)
-        )
-
-        logging.info(f"Sent index data for URL: {url}")
+        try:
+            self.sqs.send_message(
+                QueueUrl=self.indexer_queue_url,
+                MessageBody=json.dumps(message)
+            )
+            logging.info(f"Sent index data for URL: {url}")
+        except Exception as e:
+            logging.error(f"Failed to send index data for URL: {url} | Error: {e}")
 
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
         while True:
             response = self.sqs.receive_message(
-                QueueUrl = self.crawler_queue,
+                QueueUrl = self.crawler_queue_url,
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=10
-            )     
+            )
 
             if self.shutdown_requested:
                 logging.info("Shutdown requested. Exiting before processing new messages.")
@@ -246,7 +233,6 @@ class Crawler:
                         logging.info(f"Reported successful URL to master: {url}")
                         s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content)
                         self.send_to_indexer(s3_key, url)
-                        self.save_content_locally(url, title, meta_description, canonical_url, text_content)
                     else:
                         self.send_to_master(url, extracted_links=[], depth=depth, status="failed", error="Failed to fetch")
                         logging.info(f"Reported failed URL to master: {url}")
@@ -255,7 +241,7 @@ class Crawler:
 
                 # Delete the processed message from queue
                 self.sqs.delete_message(
-                    QueueUrl=self.crawler_queue,
+                    QueueUrl=self.crawler_queue_url,
                     ReceiptHandle=receipt_handle
                 )
                 # TRY-EXCEPT

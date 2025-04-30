@@ -6,18 +6,18 @@ import time
 from elasticsearch import Elasticsearch
 
 
-class WebIndexer:
+class Indexer:
     # NO DEFAULT VALUES
-    def __init__(self, es_host="localhost", es_port=9200, index_name="web_content",
-                 region='us-east-1', aws_key="your-access-key", aws_secret="your-secret-key",
-                 content_queue_url='your-content-queue-url', search_queue_url='your-search-queue-url', delay=2):
+    def __init__(self, es_host, es_port, index_name, aws_key, aws_secret, s3_bucket,
+                 content_queue_url, search_queue_url, region='us-east-1', delay=2):
 
         self.es_host = es_host
         self.es_port = es_port
         self.index_name = index_name
         self.delay = delay
-
         self.region = region
+
+        self.s3_bucket = s3_bucket
         self.aws_key = aws_key
         self.aws_secret = aws_secret
         self.content_queue_url = content_queue_url
@@ -92,7 +92,7 @@ class WebIndexer:
 
     def read_from_s3(self, s3_key):
         try:
-            response = self.s3.get_object(Bucket=self.bucket_name, Key=s3_key)
+            response = self.s3.get_object(Bucket=self.s3_bucket, Key=s3_key)
             content = response['Body'].read().decode('utf-8')
             logging.info(f"Read from S3: {s3_key}")
             return content
