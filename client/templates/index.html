@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Distributed Web Crawler Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 2em; }
+        textarea, input[type="text"] { width: 100%; padding: 0.5em; margin: 0.5em 0; }
+        button { padding: 0.5em 1em; margin: 1em 0; }
+        .section { margin-bottom: 2em; }
+        .results { background: #f9f9f9; padding: 1em; border: 1px solid #ddd; }
+    </style>
+</head>
+<body>
+    <h1>Distributed Web Crawler Client</h1>
+
+    <div class="section">
+        <h2>Search</h2>
+        <form action="/search" method="POST">
+            <input type="text" name="query" placeholder="Enter search query" required />
+            <button type="submit">Search</button>
+        </form>
+
+        {% if query %}
+        <h3>Results for "{{ query }}":</h3>
+        <div class="results">
+            {% if results %}
+                <ul>
+                {% for result in results %}
+                    <li>
+                        <strong>{{ result.title }}</strong><br>
+                        <a href="{{ result.url }}" target="_blank">{{ result.url }}</a><br>
+                        {% if result.highlight %}
+                            <em>...{{ result.highlight.content[0] if result.highlight.content else '' }}...</em>
+                        {% endif %}
+                    </li>
+                {% endfor %}
+                </ul>
+            {% else %}
+                <p>No results found.</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="section">
+        <h2>Start Crawl</h2>
+        <form action="/crawl" method="POST">
+            <textarea name="seeds" rows="5" placeholder="Enter one URL per line" required></textarea>
+            <button type="submit">Submit Seed URLs</button>
+        </form>
+
+        {% if message %}
+        <p><strong>{{ message }}</strong></p>
+        {% endif %}
+    </div>
+</body>
+</html>
