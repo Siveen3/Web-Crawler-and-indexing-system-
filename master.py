@@ -243,6 +243,7 @@ if __name__ == "__main__":
         heartbeat_table_name='CrawlerHeartbeatTable',
         task_table_name='CrawlerTaskAssignments',
         dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/DeadLetterQueue',
+        blocked_table_name = ='BlockedUrlsTable',
         max_depth=2
     )
 
