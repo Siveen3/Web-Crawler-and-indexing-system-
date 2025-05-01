@@ -14,6 +14,8 @@ class Indexer:
         self.indexer_id = indexer_id
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table) #?
 
+
+        self.statuses = ['index_success', 'index_failure', 'search_success', 'search_failure']
         self.es_host = es_host
         self.es_port = es_port
         self.index_name = index_name
@@ -101,11 +103,13 @@ class Indexer:
         }
         try:
             self.es.index(index=self.index_name, id=url, body=doc)
+            self.send_to_master(url, self.statuses[0], str(e))
             logging.info(f"Indexed document: {url}")
         except Exception as e:
+            self.send_to_master(url, self.statuses[1], str(e))
             logging.error(f"Failed to index {url}: {e}")
 
-    def read_from_s3(self, s3_key):
+    def read_from_s3(self, s3_key, url):
         try:
             response = self.s3.get_object(Bucket=self.s3_bucket, Key=s3_key)
             content = response['Body'].read().decode('utf-8')
@@ -113,31 +117,32 @@ class Indexer:
             return content
 
         except Exception as e:
+            self.send_to_master(url, self.statuses[1], str(e))
             logging.error(f"Failed to read from S3: {e}")
             
         return None
 
-    def search_index(self, query_str, mode="and"):
+    def search_index(self, query, mode="and"):
         
         if mode.lower() == "phrase":
             # Phrase match (exact match in order)
             match_query = {
                 "match_phrase": {
-                    "content": query_str
+                    "content": query
                 }
             }
             boost_query = {
                 "multi_match": {
-                    "query": query_str,
+                    "query": query,
                     "fields": ["title^3", "meta_description^2"],
                     "type": "phrase"
                 }
             }
-        else:
+        elif mode.lower() == "and" or mode.lower() == "or":
             # Normal match with AND/OR and fuzziness
             match_query = {
                 "multi_match": {
-                    "query": query_str,
+                    "query": query,
                     "fields": ["content"],
                     "operator": mode.lower(),  # "and" or "or"
                     "fuzziness": "AUTO"
@@ -145,7 +150,7 @@ class Indexer:
             }
             boost_query = {
                 "multi_match": {
-                    "query": query_str,
+                    "query": query,
                     "fields": ["title^3", "meta_description^2"],
                     "operator": mode.lower(),
                     "fuzziness": "AUTO"
@@ -170,16 +175,18 @@ class Indexer:
         }
         try:
             results = self.es.search(index=self.index_name, body=search_body)
-            return self.format_search_results(results)
+            return self.format_search_results(results, query)
         except Exception as e:
+            self.send_to_master(query, self.statuses[3], str(e))
             logging.error(f"Search failed: {e}")
             return []
 
-    def format_search_results(self, results):
+    def format_search_results(self, results, query):
         formatted = []
         for hit in results['hits']['hits']:
             source = hit['_source']
             formatted.append({
+                "query": query,
                 "url": hit["_id"],
                 "title": source.get("title", ""),
                 #"content": source.get("content", ""),
@@ -187,6 +194,24 @@ class Indexer:
             })
         return formatted
     
+    def send_to_master(self, message, status, error=None):
+        # Send crawl results (urls and status) to the master queue.
+        message = {
+            "indexer_id": self.indexer_id,
+            "message": message,
+            "status": status,
+            "error": error,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+                    
+        try:
+            self.sqs_response.send_message(
+                        QueueUrl=self.response_queue_url,
+                        MessageBody=json.dumps(message)
+                    )
+            logging.info(f"Reported index result to master for URL: {url}")
+        except Exception as e:
+            logging.error(f"Failed to report index result to master for URL: {url} | Error: {e}")
 
     def index_process(self):
         try:
@@ -211,7 +236,7 @@ class Indexer:
             url = body.get('url')
 
             # READ S3 CONTENT
-            content = self.read_from_s3(s3_key)
+            content = self.read_from_s3(s3_key, url)
             if content:
                 title = content['title']
                 meta_description = content['meta_description']      
@@ -222,22 +247,22 @@ class Indexer:
                 return
 
 
-            if text_content:
-                self.index_document(
-                    url=canonical_url if canonical_url else url,
-                    title=title,
-                    content=text_content,
-                    meta_description=meta_description
+
+            self.index_document(
+                url=canonical_url if canonical_url else url,
+                title=title,
+                content=text_content,
+                meta_description=meta_description
+            )
+            
+            try:
+                self.sqs_content.delete_message(
+                    QueueUrl=self.content_queue_url, 
+                    ReceiptHandle=receipt_handle
                 )
-                
-                try:
-                    self.sqs_content.delete_message(
-                        QueueUrl=self.content_queue_url, 
-                        ReceiptHandle=receipt_handle
-                    )
-                    logging.info(f"Deleted content message for URL: {url}")
-                except Exception as e:
-                    logging.error(f"Error deleting message from content queue: {e}")
+                logging.info(f"Deleted content message for URL: {url}")
+            except Exception as e:
+                logging.error(f"Error deleting message from content queue: {e}")
 
     def search_process(self):
         try:
@@ -262,18 +287,14 @@ class Indexer:
             query = body.get('query')
             
             if query:
-                try:
-                    results = self.search_index(query)
-                    
-                    # Send results back
-                    self.sqs_response.send_message(
-                        QueueUrl=self.response_queue_url,
-                        MessageBody=json.dumps(results)
-                    )
-                    
+               
+                results = self.search_index(query)
+
+                if results:
+                    self.send_to_master(results, self.statuses[2], str(e))
                     logging.info(f"{datetime.now()} - Processed search query: {query}")
-                except Exception as e:
-                    logging.error(f"Error processing search query: {e}")
+
+
                 
                 try:
                     self.sqs_search.delete_message(
