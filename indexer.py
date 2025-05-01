@@ -12,7 +12,7 @@ class Indexer:
                  search_queue_url, response_queue_url, region='us-east-1', delay=2):
 
         self.indexer_id = indexer_id
-        self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table) #?
+
 
 
         self.statuses = ['index_success', 'index_failure', 'search_success', 'search_failure']
@@ -103,10 +103,10 @@ class Indexer:
         }
         try:
             self.es.index(index=self.index_name, id=url, body=doc)
-            self.send_to_master(url, self.statuses[0], str(e))
+            self.send_to_master(url, self.statuses[0], url=url)
             logging.info(f"Indexed document: {url}")
         except Exception as e:
-            self.send_to_master(url, self.statuses[1], str(e))
+            self.send_to_master(url, self.statuses[1], str(e), url=url)
             logging.error(f"Failed to index {url}: {e}")
 
     def read_from_s3(self, s3_key, url):
@@ -117,12 +117,12 @@ class Indexer:
             return content
 
         except Exception as e:
-            self.send_to_master(url, self.statuses[1], str(e))
+            self.send_to_master(url, self.statuses[1], str(e), url=url)
             logging.error(f"Failed to read from S3: {e}")
             
         return None
 
-    def search_index(self, query, mode="and"):
+    def search_index(self, query, mode="and", client_id=None):
         
         if mode.lower() == "phrase":
             # Phrase match (exact match in order)
@@ -175,18 +175,18 @@ class Indexer:
         }
         try:
             results = self.es.search(index=self.index_name, body=search_body)
-            return self.format_search_results(results, query)
+            return self.format_search_results(results, client_id)
         except Exception as e:
-            self.send_to_master(query, self.statuses[3], str(e))
+            self.send_to_master(query, self.statuses[3], str(e), query=query)
             logging.error(f"Search failed: {e}")
             return []
 
-    def format_search_results(self, results, query):
+    def format_search_results(self, results, client_id):
         formatted = []
         for hit in results['hits']['hits']:
             source = hit['_source']
             formatted.append({
-                "query": query,
+                "client_id": client_id,
                 "url": hit["_id"],
                 "title": source.get("title", ""),
                 #"content": source.get("content", ""),
@@ -194,7 +194,7 @@ class Indexer:
             })
         return formatted
     
-    def send_to_master(self, message, status, error=None):
+    def send_to_master(self, message, status, error=None, url=None, query=None):
         # Send crawl results (urls and status) to the master queue.
         message = {
             "indexer_id": self.indexer_id,
@@ -209,9 +209,15 @@ class Indexer:
                         QueueUrl=self.response_queue_url,
                         MessageBody=json.dumps(message)
                     )
-            logging.info(f"Reported index result to master for URL: {url}")
+            if url:
+                logging.info(f"Reported index result to master for URL: {url}")
+            elif query:
+                logging.info(f"Reported search result to master for Query: {query}")
         except Exception as e:
-            logging.error(f"Failed to report index result to master for URL: {url} | Error: {e}")
+            if url:
+                logging.error(f"Failed to report index result to master for URL: {url} | Error: {e}")
+            elif query:
+                logging.error(f"Failed to report search result to master for Query: {query} | Error: {e}")
 
     def index_process(self):
         try:
@@ -238,10 +244,11 @@ class Indexer:
             # READ S3 CONTENT
             content = self.read_from_s3(s3_key, url)
             if content:
-                title = content['title']
-                meta_description = content['meta_description']      
-                canonical_url = content['canonical_url']
-                text_content = content['text_content']
+                title = content.get('title', '')
+                meta_description = content.get('meta_description', '')
+                canonical_url = content.get('canonical_url', '')
+                text_content = content.get('text_content', '')
+
 
             else:
                 return
@@ -285,13 +292,15 @@ class Indexer:
             receipt_handle = message['ReceiptHandle']
             
             query = body.get('query')
+            client_id = body.get('client_id')
+            mode = body.get('mode')
             
             if query:
                
-                results = self.search_index(query)
+                search_result = self.search_index(query, mode, client_id)
 
-                if results:
-                    self.send_to_master(results, self.statuses[2], str(e))
+                if search_result:
+                    self.send_to_master(search_result, self.statuses[2], query=query)
                     logging.info(f"{datetime.now()} - Processed search query: {query}")
 
 
