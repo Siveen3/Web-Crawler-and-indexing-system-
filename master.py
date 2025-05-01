@@ -103,23 +103,11 @@ class MasterNode:
 
             if time_diff > 120:
                 logging.warning(f"[Warning] {crawler_id} missed heartbeat! Last seen {int(time_diff)} seconds ago.")
-            elif status == 'skipped':
-                    logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
-                    self.blocked_table.put_item(Item={
-                        'url': crawled_url,
-                        'reason': error,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    })
-                    self.task_table.update_item(
-                        Key={'url': crawled_url},
-                        UpdateExpression="SET #s = :s",
-                        ExpressionAttributeNames={"#s": "status"},
-                        ExpressionAttributeValues={":s": "skipped"}
-                    )
+            
             else:
                 logging.info(f"[Info] {crawler_id} is alive (last seen {int(time_diff)} seconds ago).")
 
-    # This function receives crawler status reports, handles retry, DLQ, and blocked URLs
+ 
 def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
         while True:
@@ -151,6 +139,19 @@ def monitor_crawler_reports(self):
                         UpdateExpression="SET #s = :s",
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={":s": "done"}
+                    )
+                elif status == 'skipped':
+                    logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
+                    self.blocked_table.put_item(Item={
+                        'url': crawled_url,
+                        'reason': error,
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    })
+                    self.task_table.update_item(
+                        Key={'url': crawled_url},
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "skipped"}
                     )
                 else:
                     logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
@@ -243,7 +244,7 @@ if __name__ == "__main__":
         heartbeat_table_name='CrawlerHeartbeatTable',
         task_table_name='CrawlerTaskAssignments',
         dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/DeadLetterQueue',
-        blocked_table_name = ='BlockedUrlsTable',
+        blocked_table_name = 'BlockedUrlsTable',
         max_depth=2
     )
 
