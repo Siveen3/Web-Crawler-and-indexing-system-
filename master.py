@@ -5,12 +5,13 @@ import logging
 from datetime import datetime, timezone
 
 class MasterNode:
-    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name, task_table_name, max_depth=2):
+    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name, task_table_name, dead_letter_queue_url, max_depth=2):
         self.region_name = region_name
         self.crawl_queue_url = crawl_queue_url
         self.report_queue_url = report_queue_url
         self.heartbeat_table_name = heartbeat_table_name
         self.task_table_name = task_table_name
+        self.dead_letter_queue_url = dead_letter_queue_url
         self.max_depth = max_depth
 
         self.sqs = boto3.client('sqs', region_name=self.region_name)
@@ -133,19 +134,45 @@ class MasterNode:
                     )
                 else:
                     logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
-                    self.task_table.update_item(
-                        Key={'url': crawled_url},
-                        UpdateExpression="SET #s = :s",
-                        ExpressionAttributeNames={"#s": "status"},
-                        ExpressionAttributeValues={":s": "failed"}
-                    )
+                    response = self.task_table.get_item(Key={'url': crawled_url})
+                    retries = response['Item'].get('retries', 0)
+                    if retries < 3:
+                        self.send_url_to_crawl_queue(crawled_url, depth=depth)
+                        self.task_table.update_item(
+                            Key={'url': crawled_url},
+                            UpdateExpression="SET retries = :r, assigned_at = :t",
+                            ExpressionAttributeValues={
+                                ":r": retries + 1,
+                                ":t": datetime.now(timezone.utc).isoformat()
+                            }
+                        )
+                    else:
+                        self.send_to_dead_letter_queue(crawled_url, reason=error)
+                        self.task_table.update_item(
+                            Key={'url': crawled_url},
+                            UpdateExpression="SET #s = :s",
+                            ExpressionAttributeNames={"#s": "status"},
+                            ExpressionAttributeValues={":s": "failed"}
+                        )
 
                 self.sqs.delete_message(
                     QueueUrl=self.report_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
 
-    def monitor_task_timeouts(self):
+    def send_to_dead_letter_queue(self, url, reason="max retries exceeded"):
+        message = {
+            "url": url,
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        self.sqs.send_message(
+            QueueUrl=self.dead_letter_queue_url,
+            MessageBody=json.dumps(message)
+        )
+        logging.warning(f"[DLQ] Sent URL to dead-letter queue: {url}")
+
+def monitor_task_timeouts(self): 
         logging.info("[Monitor] Checking for task timeouts...")
         now = datetime.now(timezone.utc)
 
@@ -173,7 +200,8 @@ class MasterNode:
                         }
                     )
                 else:
-                    logging.error(f"[Fail] Task {url} exceeded retry limit. Giving up.")
+                    logging.error(f"[Fail] Task {url} exceeded retry limit. Sending to DLQ.")
+                    self.send_to_dead_letter_queue(url, reason="timeout exceeded")
                     self.task_table.update_item(
                         Key={'url': url},
                         UpdateExpression="SET #s = :s",
@@ -189,6 +217,7 @@ if __name__ == "__main__":
         report_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/ReportQueue',
         heartbeat_table_name='CrawlerHeartbeatTable',
         task_table_name='CrawlerTaskAssignments',
+        dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/DeadLetterQueue',
         max_depth=2
     )
 
