@@ -106,7 +106,23 @@ class MasterNode:
             
             else:
                 logging.info(f"[Info] {crawler_id} is alive (last seen {int(time_diff)} seconds ago).")
+    def count_crawled_urls(self):
+        scanned = self.task_table.scan()
+        done = sum(1 for item in scanned['Items'] if item['status'] == 'done')
+        logging.info(f"Total URLs crawled successfully: {done}")
+        print(f"Total URLs crawled successfully: {done}")
 
+    def compute_error_rate(self):
+        scanned = self.task_table.scan()
+        total = len(scanned['Items'])
+        failed = sum(1 for item in scanned['Items'] if item['status'] == 'failed')
+        skipped = sum(1 for item in scanned['Items'] if item['status'] == 'skipped')
+        logging.info(f" Failed: {failed}, Total: {total}")
+        if total > 0:
+            error_rate = (failed / total) * 100
+            print(f"Error rate: {error_rate:.2f}%")
+        else:
+            print("Error rate: 0.00%")
  
 def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
