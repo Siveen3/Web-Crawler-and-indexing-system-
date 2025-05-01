@@ -3,55 +3,356 @@
 <head>
     <title>Distributed Web Crawler Client</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 2em; }
+        body { font-family:Impact, Haettenschweiler, 'Arial Narrow Bold', sans-serif Geneva, Tahoma, sans-serif, Geneva, Verdana, sans-serif ;margin: 2em;background-color: beige; }
         textarea, input[type="text"] { width: 100%; padding: 0.5em; margin: 0.5em 0; }
-        button { padding: 0.5em 1em; margin: 1em 0; }
+        button { padding: 0.5em 1em; margin: 1em 0; cursor: pointer; }
         .section { margin-bottom: 2em; }
         .results { background: #f9f9f9; padding: 1em; border: 1px solid #ddd; }
     </style>
 </head>
 <body>
-    <h1>Distributed Web Crawler Client</h1>
+    
 
     <div class="section">
-        <h2>Search</h2>
-        <form action="/search" method="POST">
-            <input type="text" name="query" placeholder="Enter search query" required />
-            <button type="submit">Search</button>
-        </form>
-
-        {% if query %}
-        <h3>Results for "{{ query }}":</h3>
-        <div class="results">
-            {% if results %}
-                <ul>
-                {% for result in results %}
-                    <li>
-                        <strong>{{ result.title }}</strong><br>
-                        <a href="{{ result.url }}" target="_blank">{{ result.url }}</a><br>
-                        {% if result.highlight %}
-                            <em>...{{ result.highlight.content[0] if result.highlight.content else '' }}...</em>
+       
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Distributed Web Crawler Client</title>
+            <style>
+                :root {
+                    --primary: #1e88e5;
+                    --primary-dark: #1565c0;
+                    --secondary: #455a64;
+                    --light-bg: #f5f5f5;
+                    --border: #e0e0e0;
+                    --text: #212121;
+                    --text-light: #757575;
+                    --success: #4caf50;
+                    --danger: #f44336;
+                }
+                
+                * {
+                    box-sizing: border-box;
+                    margin: 0;
+                    padding: 0;
+                }
+                
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    color: var(--text);
+                    background-color: var(--light-bg);
+                    line-height: 1.6;
+                }
+                
+                .container {
+                    max-width: 1100px;
+                    margin: 0 auto;
+                    padding: 2rem;
+                }
+                
+                header {
+                    background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+                    color: white;
+                    padding: 2rem 0;
+                    margin-bottom: 2rem;
+                    border-radius: 8px;
+                    box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+                }
+                
+                header .container {
+                    display: flex;
+                    justify-content: space-between;
+                    align-items: center;
+                }
+                
+                .logo {
+                    display: flex;
+                    align-items: center;
+                    gap: 12px;
+                }
+                
+                .logo-icon {
+                    font-size: 2rem;
+                }
+                
+                h1 {
+                    font-size: 1.8rem;
+                    font-weight: 600;
+                }
+                
+                h2 {
+                    color: var(--primary-dark);
+                    margin-bottom: 1rem;
+                    font-size: 1.4rem;
+                    font-weight: 500;
+                    border-bottom: 2px solid var(--primary);
+                    padding-bottom: 0.5rem;
+                    display: inline-block;
+                }
+                
+                .card {
+                    background: white;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                    padding: 1.5rem;
+                    margin-bottom: 2rem;
+                    border: 1px solid var(--border);
+                }
+                
+                .form-group {
+                    margin-bottom: 1rem;
+                }
+                
+                label {
+                    display: block;
+                    margin-bottom: 0.5rem;
+                    font-weight: 500;
+                    color: var(--secondary);
+                }
+                
+                input[type="text"], textarea {
+                    width: 100%;
+                    padding: 0.8rem;
+                    border: 1px solid var(--border);
+                    border-radius: 4px;
+                    font-family: inherit;
+                    font-size: 1rem;
+                    transition: border-color 0.2s;
+                }
+                
+                input[type="text"]:focus, textarea:focus {
+                    outline: none;
+                    border-color: var(--primary);
+                    box-shadow: 0 0 0 3px rgba(30, 136, 229, 0.2);
+                }
+                
+                textarea {
+                    min-height: 100px;
+                    resize: vertical;
+                }
+                
+                button {
+                    background-color: var(--primary);
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    padding: 0.8rem 1.5rem;
+                    font-size: 1rem;
+                    font-weight: 500;
+                    cursor: pointer;
+                    transition: background-color 0.2s;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                }
+                
+                button:hover {
+                    background-color: var(--primary-dark);
+                }
+                
+                .results-container {
+                    margin-top: 1rem;
+                }
+                
+                .result-item {
+                    padding: 1rem;
+                    border-bottom: 1px solid var(--border);
+                }
+                
+                .result-item:last-child {
+                    border-bottom: none;
+                }
+                
+                .result-title {
+                    font-size: 1.1rem;
+                    font-weight: 600;
+                    color: var(--primary-dark);
+                    margin-bottom: 0.3rem;
+                }
+                
+                .result-url {
+                    color: var(--primary);
+                    text-decoration: none;
+                    font-size: 0.9rem;
+                    margin-bottom: 0.5rem;
+                    display: block;
+                    word-break: break-all;
+                }
+                
+                .result-url:hover {
+                    text-decoration: underline;
+                }
+                
+                .result-highlight {
+                    font-size: 0.9rem;
+                    color: var(--text-light);
+                    background-color: rgba(255, 248, 225, 0.5);
+                    padding: 0.5rem;
+                    border-radius: 4px;
+                    border-left: 3px solid #ffc107;
+                }
+                
+                .status-message {
+                    padding: 1rem;
+                    margin: 1rem 0;
+                    border-radius: 4px;
+                    background-color: #e3f2fd;
+                    border-left: 4px solid var(--primary);
+                }
+                
+                .no-results {
+                    color: var(--text-light);
+                    font-style: italic;
+                    padding: 1rem;
+                    text-align: center;
+                    background-color: rgba(0,0,0,0.02);
+                    border-radius: 4px;
+                }
+                
+                .footer {
+                    margin-top: 3rem;
+                    text-align: center;
+                    color: var(--text-light);
+                    font-size: 0.9rem;
+                }
+                
+                @media (max-width: 768px) {
+                    .container {
+                        padding: 1rem;
+                    }
+                    
+                    header .container {
+                        flex-direction: column;
+                        text-align: center;
+                    }
+                }
+                
+                /* Dashboard Stats Section */
+                .stats-grid {
+                    display: grid;
+                    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+                    gap: 1rem;
+                    margin-bottom: 1.5rem;
+                }
+                
+                .stat-card {
+                    background: white;
+                    border-radius: 8px;
+                    padding: 1rem;
+                    text-align: center;
+                    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                    border: 1px solid var(--border);
+                }
+                
+                .stat-value {
+                    font-size: 1.8rem;
+                    font-weight: bold;
+                    color: var(--primary-dark);
+                    margin: 0.5rem 0;
+                }
+                
+                .stat-label {
+                    color: var(--text-light);
+                    font-size: 0.9rem;
+                }
+            </style>
+        </head>
+        <body>
+            <header>
+                <div class="container">
+                    <div class="logo">
+                        <span class="logo-icon">🕸️</span>
+                        <h1>Distributed Web Crawler</h1>
+                    </div>
+                    <div>
+                        <p>Powerful crawling. Simple interface.</p>
+                    </div>
+                </div>
+            </header>
+            
+            <div class="container">
+                <div class="card">
+                    <h2>Dashboard</h2>
+                    <div class="stats-grid">
+                        <div class="stat-card">
+                            <div class="stat-value">3</div>
+                            <div class="stat-label">Active Crawlers</div>
+                        </div>
+                        <div class="stat-card">
+                            <div class="stat-value">12,456</div>
+                            <div class="stat-label">Pages Indexed</div>
+                        </div>
+                        
+                       
+                    </div>
+                </div>
+                
+                <div class="card">
+                    <h2>Search</h2>
+                    <form action="/search" method="POST">
+                        <div class="form-group">
+                            <label for="query">Search Query:</label>
+                            <input type="text" id="query" name="query" placeholder="Enter search keywords..." required>
+                        </div>
+                        <button type="submit">🔍 Search</button>
+                    </form>
+                    
+                    {% if query %}
+                    <div class="results-container">
+                        <h3>Results for "{{ query }}":</h3>
+                        
+                        {% if results %}
+                        <div class="results">
+                            {% for result in results %}
+                            <div class="result-item">
+                                <div class="result-title">{{ result.title }}</div>
+                                <a href="{{ result.url }}" target="_blank" class="result-url">{{ result.url }}</a>
+                                {% if result.highlight %}
+                                <div class="result-highlight">
+                                    <em>......</em>
+                                </div>
+                                {% endif %}
+                            </div>
+                            {% endfor %}
+                        </div>
+                        {% else %}
+                        <div class="no-results">
+                            <p>No results found for your query. Try different keywords or start a new crawl.</p>
+                        </div>
                         {% endif %}
-                    </li>
-                {% endfor %}
-                </ul>
-            {% else %}
-                <p>No results found.</p>
-            {% endif %}
-        </div>
-        {% endif %}
-    </div>
+                    </div>
+                    {% endif %}
+                </div>
+                
+                <div class="card">
+                    <h2>Start New Crawl</h2>
+                    <form action="/crawl" method="POST">
+                        <div class="form-group">
+                            <label for="seeds">Seed URLs:</label>
+                            <textarea id="seeds" name="seeds" placeholder="Enter one URL per line (e.g., https://example.com)" required></textarea>
+                            <small style="color: var(--text-light); display: block; margin-top: 0.3rem;">For best results, include complete URLs with protocol (http:// or https://)</small>
+                        </div>
+                        <button type="submit">🚀 Submit Seed URLs</button>
+                    </form>
+                    
+                    {% if message %}
+                    <div class="status-message">
+                        <strong>{{ message }}</strong>
+                    </div>
+                    {% endif %}
+                </div>
+                
+                <footer class="footer">
+                    <p>Distributed Web Crawler Client v1.0 | © 2025</p>
+                </footer>
+            </div>
+        </body>
+        </html>
 
-    <div class="section">
-        <h2>Start Crawl</h2>
-        <form action="/crawl" method="POST">
-            <textarea name="seeds" rows="5" placeholder="Enter one URL per line" required></textarea>
-            <button type="submit">Submit Seed URLs</button>
-        </form>
+        
 
-        {% if message %}
-        <p><strong>{{ message }}</strong></p>
-        {% endif %}
-    </div>
+   
 </body>
 </html>
