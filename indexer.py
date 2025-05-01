@@ -4,11 +4,15 @@ import logging
 import re
 import time
 from elasticsearch import Elasticsearch
+from datetime import datetime, timezone
 
 
 class Indexer:
-    def __init__(self, es_host, es_port, index_name, s3_bucket,	content_queue_url, 
+    def __init__(self, indexer_id, es_host, es_port, index_name, s3_bucket,	content_queue_url, 
                  search_queue_url, response_queue_url, region='us-east-1', delay=2):
+
+        self.indexer_id = indexer_id
+        self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table) #?
 
         self.es_host = es_host
         self.es_port = es_port
@@ -33,6 +37,20 @@ class Indexer:
         # Configure logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - Indexer - %(levelname)s - %(message)s')
 
+    def heartbeat(self):
+        try:
+            self.heartbeat_table.put_item(
+                Item={
+                    'crawler_id': self.crawler_id,
+                    'status': 'running',
+                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
+                }
+            )
+            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {time.time()}")
+        
+        except Exception as e:
+            logging.error(f"Failed to send heartbeat: {e}")
+            
     def initialize_elasticsearch(self):
         es = Elasticsearch([{'host': self.es_host, 'port': self.es_port}])
         if not es.indices.exists(index=self.index_name):
@@ -99,17 +117,47 @@ class Indexer:
             
         return None
 
-    def search_index(self, query_str):
+    def search_index(self, query_str, mode="and"):
+        
+        if mode.lower() == "phrase":
+            # Phrase match (exact match in order)
+            match_query = {
+                "match_phrase": {
+                    "content": query_str
+                }
+            }
+            boost_query = {
+                "multi_match": {
+                    "query": query_str,
+                    "fields": ["title^3", "meta_description^2"],
+                    "type": "phrase"
+                }
+            }
+        else:
+            # Normal match with AND/OR and fuzziness
+            match_query = {
+                "multi_match": {
+                    "query": query_str,
+                    "fields": ["content"],
+                    "operator": mode.lower(),  # "and" or "or"
+                    "fuzziness": "AUTO"
+                }
+            }
+            boost_query = {
+                "multi_match": {
+                    "query": query_str,
+                    "fields": ["title^3", "meta_description^2"],
+                    "operator": mode.lower(),
+                    "fuzziness": "AUTO"
+                }
+            }
+
         search_body = {
             "query": {
-                "function_score": {
-                    "query": {
-                        "multi_match": {
-                            "query": query_str,
-                            "fields": ["title^3", "content^1", "meta_description^2"],
-                            "type": "cross_fields"
-                        }
-                    }
+                "bool": {
+                    "must": [match_query],
+                    "should": [boost_query],
+                    "minimum_should_match": 0
                 }
             },
             "highlight": {
@@ -138,6 +186,7 @@ class Indexer:
                 "highlight": hit.get("highlight", {})
             })
         return formatted
+    
 
     def index_process(self):
         try:
@@ -198,6 +247,9 @@ class Indexer:
                 WaitTimeSeconds=2
             )
             message_search = response_search.get('Messages', [])
+            if not message_search:
+                logging.debug("Search queue is empty.")
+
         except Exception as e:
             logging.error(f"Error receiving from search queue: {e}")
             message_search = []
@@ -208,9 +260,8 @@ class Indexer:
             receipt_handle = message['ReceiptHandle']
             
             query = body.get('query')
-            response_queue = body.get('response_queue')
             
-            if query and response_queue:
+            if query:
                 try:
                     results = self.search_index(query)
                     
@@ -220,7 +271,7 @@ class Indexer:
                         MessageBody=json.dumps(results)
                     )
                     
-                    logging.info(f"Processed search query: {query}")
+                    logging.info(f"{datetime.now()} - Processed search query: {query}")
                 except Exception as e:
                     logging.error(f"Error processing search query: {e}")
                 
@@ -239,3 +290,7 @@ class Indexer:
             self.index_process()
             self.search_process()
             time.sleep(self.delay)
+
+
+
+
