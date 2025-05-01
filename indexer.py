@@ -3,6 +3,7 @@ import json
 import logging
 import re
 import time
+import threading
 from elasticsearch import Elasticsearch
 from datetime import datetime, timezone
 
@@ -13,6 +14,9 @@ class Indexer:
 
         self.indexer_id = indexer_id
 
+        self.dynamodb = boto3.resource('dynamodb', region_name=region)
+        self.dynamodb_table = "YourDynamoDBTableName"  # Replace with your actual table name
+        self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
 
 
         self.statuses = ['index_success', 'index_failure', 'search_success', 'search_failure']
@@ -43,16 +47,22 @@ class Indexer:
         try:
             self.heartbeat_table.put_item(
                 Item={
-                    'crawler_id': self.crawler_id,
+                    'indexer_id': self.indexer_id,
                     'status': 'running',
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
             )
-            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {time.time()}")
-        
+            logging.info(f"Heartbeat sent for indexer {self.indexer_id} at {time.time()}")
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
-            
+
+    def start_heartbeat(self):
+        def run():
+            while True:
+                self.heartbeat()
+                time.sleep(10)
+        threading.Thread(target=run, daemon=True).start()
+
     def initialize_elasticsearch(self):
         es = Elasticsearch([{'host': self.es_host, 'port': self.es_port}])
         if not es.indices.exists(index=self.index_name):
@@ -316,6 +326,7 @@ class Indexer:
 
     def start_indexing(self):
         logging.info("Indexer started. Waiting for SQS messages...")
+        self.start_heartbeat()
         while True:
             self.index_process()
             self.search_process()
