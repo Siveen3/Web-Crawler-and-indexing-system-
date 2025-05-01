@@ -9,13 +9,13 @@ from datetime import datetime, timezone
 
 
 class Indexer:
-    def __init__(self, indexer_id, es_host, es_port, index_name, s3_bucket,	content_queue_url, 
+    def __init__(self, indexer_id, dynamodb_table, es_host, es_port, index_name, s3_bucket,	content_queue_url, 
                  search_queue_url, response_queue_url, region='us-east-1', delay=2):
 
         self.indexer_id = indexer_id
 
+        self.dynamodb_table = dynamodb_table
         self.dynamodb = boto3.resource('dynamodb', region_name=region)
-        self.dynamodb_table = "YourDynamoDBTableName"  # Replace with your actual table name
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
 
 
