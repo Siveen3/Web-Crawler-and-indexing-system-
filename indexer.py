@@ -134,7 +134,9 @@ class Indexer:
 
     def search_index(self, query, mode="and", client_id=None):
         
-        if mode.lower() == "phrase":
+        mode = mode.lower() if mode else "and"
+        
+        if mode == "phrase":
             # Phrase match (exact match in order)
             match_query = {
                 "match_phrase": {
@@ -148,13 +150,13 @@ class Indexer:
                     "type": "phrase"
                 }
             }
-        elif mode.lower() == "and" or mode.lower() == "or":
+        elif mode == "and" or mode == "or":
             # Normal match with AND/OR and fuzziness
             match_query = {
                 "multi_match": {
                     "query": query,
                     "fields": ["content"],
-                    "operator": mode.lower(),  # "and" or "or"
+                    "operator": mode,  # "and" or "or"
                     "fuzziness": "AUTO"
                 }
             }
@@ -187,7 +189,7 @@ class Indexer:
             results = self.es.search(index=self.index_name, body=search_body)
             return self.format_search_results(results, client_id)
         except Exception as e:
-            self.send_to_master(query, self.statuses[3], str(e), query=query)
+            self.send_to_master(client_id, self.statuses[3], str(e), query=query)
             logging.error(f"Search failed: {e}")
             return []
 
@@ -253,15 +255,12 @@ class Indexer:
 
             # READ S3 CONTENT
             content = self.read_from_s3(s3_key, url)
-            if content:
-                title = content.get('title', '')
-                meta_description = content.get('meta_description', '')
-                canonical_url = content.get('canonical_url', '')
-                text_content = content.get('text_content', '')
-
-
-            else:
+            if not content:
                 return
+            title = content.get('title', '')
+            meta_description = content.get('meta_description', '')
+            canonical_url = content.get('canonical_url', '')
+            text_content = content.get('text_content', '')
 
 
 
