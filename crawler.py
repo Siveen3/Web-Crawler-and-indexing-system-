@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import urllib.robotparser
 from urllib.parse import urlparse
 import signal
+import hashlib
 
 class Crawler:
     def __init__(self, 
@@ -37,7 +38,7 @@ class Crawler:
         self.s3 = boto3.client('s3', region_name=self.region)    # AWS S3 client
         self.dynamodb = boto3.resource('dynamodb', region_name=self.region)
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
-
+        self.crawled_table = self.dynamodb.Table(self.dynamodb_table)
         # Configure logging to show time, log level, and message
         logging.basicConfig(filename='crawler_node.log', filemode='w', level=logging.INFO, 
                             format='%(asctime)s [%(levelname)s] %(message)s')
@@ -72,6 +73,23 @@ class Crawler:
         
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
+
+
+    def save_crawled_url(self, url, domain, s3_key):
+        try:
+            self.crawled_table.put_item(
+                Item={
+                    'url': url,
+                    'domain': domain,
+                    's3_key': s3_key,
+                    'timestamp': datetime.now(timezone.utc).isoformat()
+                }
+            )
+            logging.info(f"Saved crawled URL: {url} to crawled_table")
+        except Exception as e:
+            logging.error(f"Failed to save crawled URL: {url} | Error: {e}")
+            self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error=f"Failed to save to crawled_table: {e}")
+            
 
     def is_allowed_by_robots(self, url):
         parsed = urlparse(url)
@@ -108,7 +126,7 @@ class Crawler:
                 # DID WE SEND TO MASTER?
 
 
-    def extract_content(self, html_content, base_url):
+    def extract_content(self, html_content, base_url, domain):
         # Extracts the title, text content, meta description, canonical URL, and all URLs from the HTML content.
         soup = BeautifulSoup(html_content, 'html.parser')
 
@@ -122,7 +140,8 @@ class Crawler:
         urls = set()
         for a in soup.find_all('a', href=True):
             parsed = urlparse(urljoin(base_url, a['href']))
-            if parsed.scheme in ('http', 'https'):
+            url_domain = parsed.netloc.lower()
+            if parsed.scheme in ('http', 'https') and (domain is None or domain in url_domain):
                 normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}{parsed.query}{parsed.fragment}"
                 if normalized_url != base_url:
                     urls.add(normalized_url)
@@ -136,10 +155,10 @@ class Crawler:
         # Send crawl results (urls and status) to the master queue.
         message = {
             "crawler_id": self.crawler_id,
+            "status": status,
             "url": url,
             "extracted_urls": extracted_urls,
             "depth": depth,
-            "status": status,
             "error": error,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
@@ -155,7 +174,7 @@ class Crawler:
 
     def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content):
         # Upload extracted text content to S3.        
-        s3_key = f"crawled_content/{hash(url)}.json"
+        s3_key = f"crawled_content/{hashlib.md5(url.encode()).hexdigest()}.json"
         content = {
             "url": url,
             "title": title,
@@ -189,6 +208,9 @@ class Crawler:
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
         while True:
+            # Send a heartbeat at the start of each iteration
+            self.heartbeat()
+            
             response = self.sqs.receive_message(
                 QueueUrl = self.crawler_queue_url,
                 MaxNumberOfMessages=1,
@@ -216,9 +238,9 @@ class Crawler:
             body = json.loads(message['Body'])
             url = body.get('url')
             depth = body.get('depth', 0)
+            domain = body.get('domain')
 
             logging.info(f"Processing URL: {url}")
-            self.heartbeat()
 
             if not self.is_allowed_by_robots(url):
                 logging.warning(f"This URL is blocked by robots.txt: {url}")
@@ -229,7 +251,7 @@ class Crawler:
                 html_content = self.fetch_url(url)
 
                 if html_content:
-                    title, text_content, meta_description, canonical_url, extracted_urls = self.extract_content(html_content, url)
+                    title, text_content, meta_description, canonical_url, extracted_urls = self.extract_content(html_content, url, domain)
                     logging.info(f"Finished processing URL: {url}")
 
                     self.send_to_master(url=url, extracted_urls=extracted_urls, depth=depth, status="success")
@@ -240,6 +262,7 @@ class Crawler:
                     else:
                         logging.error(f"Skipping indexer send due to failed S3 upload for URL: {url}")
                         self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to upload to S3")
+                        continue
                 else:
                     self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to fetch")
                     logging.info(f"Reported failed URL to master: {url}")
