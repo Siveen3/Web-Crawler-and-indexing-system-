@@ -5,7 +5,9 @@ import logging
 from datetime import datetime, timezone
 
 class MasterNode:
-    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name, task_table_name, dead_letter_queue_url, max_depth=2):
+    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name,
+                  task_table_name, dead_letter_queue_url, blocked_table_name,
+        max_depth=2):
         self.region_name = region_name
         self.crawl_queue_url = crawl_queue_url
         self.report_queue_url = report_queue_url
@@ -18,6 +20,7 @@ class MasterNode:
         self.dynamodb = boto3.resource('dynamodb', region_name=self.region_name)
         self.heartbeat_table = self.dynamodb.Table(self.heartbeat_table_name)
         self.task_table = self.dynamodb.Table(self.task_table_name)
+        self.blocked_table = self.dynamodb.Table(blocked_table_name)
 
         logging.basicConfig(filename='master_log.log', level=logging.INFO,
                             format='%(asctime)s [%(levelname)s] %(message)s')
@@ -25,6 +28,9 @@ class MasterNode:
         self.TIMEOUT_SECONDS = 120
 
     def send_url_to_crawl_queue(self, url, depth=0):
+        if self.is_blocked_url(url):
+            logging.warning(f"[Master] Skipping blocked URL: {url}")
+            return
         message = {
             "url": url,
             "depth": depth,
@@ -97,10 +103,24 @@ class MasterNode:
 
             if time_diff > 120:
                 logging.warning(f"[Warning] {crawler_id} missed heartbeat! Last seen {int(time_diff)} seconds ago.")
+            elif status == 'skipped':
+                    logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
+                    self.blocked_table.put_item(Item={
+                        'url': crawled_url,
+                        'reason': error,
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    })
+                    self.task_table.update_item(
+                        Key={'url': crawled_url},
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "skipped"}
+                    )
             else:
                 logging.info(f"[Info] {crawler_id} is alive (last seen {int(time_diff)} seconds ago).")
 
-    def monitor_crawler_reports(self):
+    # This function receives crawler status reports, handles retry, DLQ, and blocked URLs
+def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
         while True:
             response = self.sqs.receive_message(
@@ -160,7 +180,7 @@ class MasterNode:
                     ReceiptHandle=message['ReceiptHandle']
                 )
 
-    def send_to_dead_letter_queue(self, url, reason="max retries exceeded"):
+def send_to_dead_letter_queue(self, url, reason="max retries exceeded"):
         message = {
             "url": url,
             "reason": reason,
@@ -172,7 +192,7 @@ class MasterNode:
         )
         logging.warning(f"[DLQ] Sent URL to dead-letter queue: {url}")
 
-def monitor_task_timeouts(self): 
+def monitor_task_timeouts(self):
         logging.info("[Monitor] Checking for task timeouts...")
         now = datetime.now(timezone.utc)
 
@@ -208,6 +228,11 @@ def monitor_task_timeouts(self):
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={":s": "failed"}
                     )
+
+
+def is_blocked_url(self, url):
+        response = self.blocked_table.get_item(Key={'url': url})
+        return 'Item' in response
 
 
 if __name__ == "__main__":
