@@ -9,14 +9,6 @@ from datetime import datetime, timezone
 import urllib.robotparser
 from urllib.parse import urlparse
 import signal
-from urllib.parse import urlparse
-
-def sanitize_urls(self, urls):
-    return list(set(
-        url for url in urls 
-        if urlparse(url).scheme in ('http', 'https')
-    ))
-
 
 class Crawler:
     def __init__(self, 
