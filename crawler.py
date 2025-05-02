@@ -32,6 +32,7 @@ class Crawler:
         self.dynamodb_table = dynamodb_table
         self.region = region
         self.delay = delay
+        self.is_shutdown = False  # Add shutdown state
 
         # Create AWS clients
         self.sqs = boto3.client('sqs', region_name=self.region)  # AWS SQS client
@@ -207,6 +208,59 @@ class Crawler:
         except Exception as e:
             logging.error(f"Failed to send index data for URL: {url} | Error: {e}")
 
+    def handle_master_shutdown(self, receipt_handle):
+        """Handle shutdown signal from master node"""
+        logging.info(f"[Crawler {self.crawler_id}] Received shutdown signal from master")
+        self.send_to_master(
+            url="",
+            extracted_urls=[],
+            depth=-1,
+            status="shutdown",
+            error="Received shutdown signal from master"
+        )
+        # Remove from heartbeat table
+        try:
+            self.heartbeat_table.delete_item(
+                Key={'crawler_id': self.crawler_id}
+            )
+            logging.info(f"[Crawler {self.crawler_id}] Removed from heartbeat table")
+        except Exception as e:
+            logging.error(f"[Crawler {self.crawler_id}] Error removing from heartbeat table: {e}")
+        
+        # Delete the message
+        self.sqs.delete_message(
+            QueueUrl=self.crawler_queue_url,
+            ReceiptHandle=receipt_handle
+        )
+        logging.info(f"[Crawler {self.crawler_id}] Entered shutdown state")
+        self.is_shutdown = True
+        return True
+
+    def handle_wake_up(self, receipt_handle):
+        """Handle wake-up signal from master node"""
+        logging.info(f"[Crawler {self.crawler_id}] Received wake-up signal from master")
+        # Register in heartbeat table
+        try:
+            self.heartbeat_table.put_item(
+                Item={
+                    'crawler_id': self.crawler_id,
+                    'status': 'running',
+                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
+                }
+            )
+            logging.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table")
+        except Exception as e:
+            logging.error(f"[Crawler {self.crawler_id}] Error registering in heartbeat table: {e}")
+            return False
+        
+        # Delete the message
+        self.sqs.delete_message(
+            QueueUrl=self.crawler_queue_url,
+            ReceiptHandle=receipt_handle
+        )
+        logging.info(f"[Crawler {self.crawler_id}] Ready to process URLs")
+        return True
+
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
         while True:
@@ -238,6 +292,30 @@ class Crawler:
 
             receipt_handle = message['ReceiptHandle']
             body = json.loads(message['Body'])
+            
+            # Check for wake-up signal from master
+            if body.get('wake_up') and body.get('crawler_id') == self.crawler_id:
+                if self.is_shutdown:  # Only handle wake-up if we're in shutdown state
+                    self.handle_wake_up(receipt_handle)
+                    self.is_shutdown = False
+                continue
+
+            # Check for shutdown signal from master
+            if body.get('shutdown') and body.get('crawler_id') == self.crawler_id:
+                if not self.is_shutdown:  # Only handle shutdown if we're not already shutdown
+                    self.handle_master_shutdown(receipt_handle)
+                continue
+
+            # Only process URLs if not in shutdown state
+            if not self.is_shutdown:
+                url = body.get('url')
+                depth = body.get('depth', 0)
+                domain = body.get('domain')
+                assigned_at = body.get('assigned_at')
+                logging.info(f"Processing URL: {url}")
+
+                if not self.is_allowed_by_robots(url):
+                    logging.warning(f"This URL is blocked by robots.txt: {url}")
             url = body.get('url')
             depth = body.get('depth', 0)
             domain = body.get('domain')

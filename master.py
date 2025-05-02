@@ -60,13 +60,35 @@ class MasterNode:
             Item={
                 'url': url,
                 'assigned_at': assigned_at,  # Always include assigned_at
-                'depth': depth,
+                'depth':Decimal(str(depth)),
                 'domain': domain,
                 'status': 'pending',
-                'retries': 0
+                'retries': Decimal(str(0))
             }
         )
        
+    def wake_up_crawler(self, crawler_id):
+        """Wake up a specific crawler by sending a wake-up signal"""
+        wake_message = {
+            "wake_up": True,
+            "crawler_id": crawler_id
+        }
+        self.sqs.send_message(
+            QueueUrl=self.crawl_queue_url,
+            MessageBody=json.dumps(wake_message, cls=DecimalEncoder)
+        )
+        logging.info(f"[Master] Sent wake-up signal to {crawler_id}")
+
+    def wake_up_all_crawlers(self):
+        """Wake up all crawlers that are in shutdown state"""
+        logging.info("[Master] Attempting to wake up all crawlers...")
+        response = self.heartbeat_table.scan()
+        for item in response['Items']:
+            crawler_id = item['crawler_id']
+            if item.get('status') == 'shutdown':
+                self.wake_up_crawler(crawler_id)
+                logging.info(f"[Master] Woke up crawler: {crawler_id}")
+
     def monitor_client_requests(self):
         logging.info("[Monitor] Listening for client requests...")
         while True:
@@ -90,6 +112,24 @@ class MasterNode:
                     )
                     logging.info(f"[Request] Forwarded search query to search queue: {body}")
                 elif msg_type == 'crawl':
+                    url = body.get('url')
+                    domain = body.get('domain')
+                    depth = body.get('depth', 0)
+                    assigned_at = datetime.now(timezone.utc).isoformat()
+                    
+                    # Record in task table
+                    self.task_table.put_item(
+                        Item={
+                            'url': url,
+                            'assigned_at': assigned_at,
+                            'depth': depth,
+                            'domain': domain,
+                            'status': 'pending',
+                            'retries': 0
+                        }
+                    )
+                    
+                    # Forward to crawl queue
                     self.sqs.send_message(
                         QueueUrl=self.crawl_queue_url,
                         MessageBody=json.dumps(body)
@@ -100,6 +140,7 @@ class MasterNode:
                     QueueUrl=self.request_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
+
     def send_shutdown_signal_to_crawlers(self):
         logging.info("[Master] Sending shutdown signals to crawlers...")
         response = self.heartbeat_table.scan()
@@ -256,6 +297,8 @@ class MasterNode:
                 assigned_at = body.get('assigned_at')
                 domain = body.get('domain', None)
                 key = {'url': crawled_url} 
+                
+                    
 
                 if status == 'success':
                     logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
@@ -293,17 +336,20 @@ class MasterNode:
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={":s": "skipped"}
                     )
+                elif status == 'shutdown':
+                    logging.info(f"[{crawler_id}] {error}")
+
                 else:
                     logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
                     response = self.task_table.get_item(Key=key)
-                    retries = response['Item'].get('retries', 0)
+                    retries = response.get('Item', {}).get('retries', 0)
                     if retries < 3:
                         self.send_url_to_crawl_queue(crawled_url, domain , depth=depth)
                         self.task_table.update_item(
                             Key=key,
                             UpdateExpression="SET retries = :r, assigned_at = :t",
                             ExpressionAttributeValues={
-                                ":r": retries + 1,
+                                ":r": Decimal(str(retries + 1)),
                                 ":t": datetime.now(timezone.utc).isoformat()
                             }
                         )
@@ -350,11 +396,12 @@ class MasterNode:
             retries = item.get('retries', 0)
             url = item['url']
             depth = item['depth']
+            domain = item['domain']
 
             if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
                 if retries < 3:
                     logging.warning(f"[Timeout] Requeuing stale task: {url}")
-                    self.send_url_to_crawl_queue(url, depth=depth)
+                    self.send_url_to_crawl_queue(url, domain, depth=depth)
                     # Delete old item
                     self.task_table.delete_item(Key={'url': url})
                     # Put new item with updated assigned_at and incremented retries
@@ -362,9 +409,9 @@ class MasterNode:
                         Item={
                             'url': url,
                             'assigned_at': now.isoformat(),
-                            'depth': depth,
+                            'depth': Decimal(str(depth)),
                             'status': 'pending',
-                            'retries': retries + 1
+                            'retries': Decimal(str(retries + 1))
                         }
                     )
                 else:
@@ -381,7 +428,6 @@ class MasterNode:
         return 'Item' in response
 
     def run_all_monitoring_tasks(self):
-        
         """Run all monitoring tasks in sequence"""
         logging.info("[Master] Starting comprehensive monitoring cycle")
         
@@ -413,6 +459,9 @@ class MasterNode:
             self.count_crawled_urls()
             self.compute_error_rate()
             self.compute_index_search_error_rates()
+        else:
+            # If there are messages but no active crawlers, wake up crawlers
+            self.wake_up_all_crawlers()
 
     
 if __name__ == "__main__":
