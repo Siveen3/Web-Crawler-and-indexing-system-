@@ -231,7 +231,7 @@ class MasterNode:
                 status = body.get('status', 'unknown')
                 error = body.get('error', '')
                 assigned_at = body.get('assigned_at')
-                domain = body.get('domain, None)
+                domain = body.get('domain', None)
                 key = {'url': crawled_url, 'assigned_at': assigned_at} 
 
                 if status == 'success':
