@@ -61,7 +61,7 @@ class MasterNode:
                 'url': url,
                 'assigned_at': assigned_at,  # Always include assigned_at
                 'depth': depth,
-                'domain': domain
+                'domain': domain,
                 'status': 'pending',
                 'retries': 0
             }
