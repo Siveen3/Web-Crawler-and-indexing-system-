@@ -3,7 +3,6 @@ import json
 import logging
 import re
 import time
-import threading
 from elasticsearch import Elasticsearch
 from datetime import datetime, timezone
 
@@ -55,13 +54,6 @@ class Indexer:
             logging.info(f"Heartbeat sent for indexer {self.indexer_id} at {time.time()}")
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
-
-    def start_heartbeat(self):
-        def run():
-            while True:
-                self.heartbeat()
-                time.sleep(10)
-        threading.Thread(target=run, daemon=True).start()
 
     def initialize_elasticsearch(self):
         es = Elasticsearch([{'host': self.es_host, 'port': self.es_port}])
@@ -164,7 +156,7 @@ class Indexer:
                 "multi_match": {
                     "query": query,
                     "fields": ["title^3", "meta_description^2"],
-                    "operator": mode.lower(),
+                    "operator": mode,
                     "fuzziness": "AUTO"
                 }
             }
@@ -325,8 +317,8 @@ class Indexer:
 
     def start_indexing(self):
         logging.info("Indexer started. Waiting for SQS messages...")
-        self.start_heartbeat()
         while True:
+            self.heartbeat()
             self.index_process()
             self.search_process()
             time.sleep(self.delay)

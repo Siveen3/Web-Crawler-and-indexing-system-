@@ -67,6 +67,28 @@ class MasterNode:
             }
         )
        
+    def wake_up_crawler(self, crawler_id):
+        """Wake up a specific crawler by sending a wake-up signal"""
+        wake_message = {
+            "wake_up": True,
+            "crawler_id": crawler_id
+        }
+        self.sqs.send_message(
+            QueueUrl=self.crawl_queue_url,
+            MessageBody=json.dumps(wake_message, cls=DecimalEncoder)
+        )
+        logging.info(f"[Master] Sent wake-up signal to {crawler_id}")
+
+    def wake_up_all_crawlers(self):
+        """Wake up all crawlers that are in shutdown state"""
+        logging.info("[Master] Attempting to wake up all crawlers...")
+        response = self.heartbeat_table.scan()
+        for item in response['Items']:
+            crawler_id = item['crawler_id']
+            if item.get('status') == 'shutdown':
+                self.wake_up_crawler(crawler_id)
+                logging.info(f"[Master] Woke up crawler: {crawler_id}")
+
     def monitor_client_requests(self):
         logging.info("[Monitor] Listening for client requests...")
         while True:
@@ -118,6 +140,7 @@ class MasterNode:
                     QueueUrl=self.request_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
+
     def send_shutdown_signal_to_crawlers(self):
         logging.info("[Master] Sending shutdown signals to crawlers...")
         response = self.heartbeat_table.scan()
@@ -400,7 +423,6 @@ class MasterNode:
         return 'Item' in response
 
     def run_all_monitoring_tasks(self):
-        
         """Run all monitoring tasks in sequence"""
         logging.info("[Master] Starting comprehensive monitoring cycle")
         
@@ -432,6 +454,9 @@ class MasterNode:
             self.count_crawled_urls()
             self.compute_error_rate()
             self.compute_index_search_error_rates()
+        else:
+            # If there are messages but no active crawlers, wake up crawlers
+            self.wake_up_all_crawlers()
 
     
 if __name__ == "__main__":
