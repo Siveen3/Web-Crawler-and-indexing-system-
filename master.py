@@ -12,15 +12,18 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(o)
 
 class MasterNode:
-    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name,
-                  task_table_name, dead_letter_queue_url, blocked_table_name,
-        max_depth=2):
+   def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name,
+                  task_table_name, dead_letter_queue_url, blocked_table_name, index_feedback_queue_url,
+                  index_status_table_name, search_success_output_queue_url, max_depth=2):
         self.region_name = region_name
         self.crawl_queue_url = crawl_queue_url
         self.report_queue_url = report_queue_url
         self.heartbeat_table_name = heartbeat_table_name
         self.task_table_name = task_table_name
         self.dead_letter_queue_url = dead_letter_queue_url
+        self.index_feedback_queue_url = index_feedback_queue_url
+        self.index_status_table_name = index_status_table_name
+        self.search_success_output_queue_url = search_success_output_queue_url
         self.max_depth = max_depth
 
         self.sqs = boto3.client('sqs', region_name=self.region_name)
@@ -28,6 +31,7 @@ class MasterNode:
         self.heartbeat_table = self.dynamodb.Table(self.heartbeat_table_name)
         self.task_table = self.dynamodb.Table(self.task_table_name)
         self.blocked_table = self.dynamodb.Table(blocked_table_name)
+        self.index_status_table = self.dynamodb.Table(self.index_status_table_name)
 
         logging.basicConfig(filename='master_log.log', level=logging.INFO,
                             format='%(asctime)s [%(levelname)s] %(message)s')
@@ -73,7 +77,7 @@ class MasterNode:
                 MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
             )
             logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
-     def monitor_indexer_feedback(self):
+    def monitor_indexer_feedback(self):
         logging.info("[Monitor] Checking indexer feedback queue...")
         while True:
             response = self.sqs.receive_message(
@@ -84,51 +88,53 @@ class MasterNode:
             messages = response.get('Messages', [])
             if not messages:
                 break
-    
+
             for message in messages:
                 body = json.loads(message['Body'])
-                status = body.get('status')
+                indexer_id = body.get('indexer_id', 'unknown')
                 msg_content = body.get('message')
-    
+                status = body.get('status')
+                error = body.get('error', '')
+                timestamp = body.get('timestamp')
+
                 if status == "search_success":
-                    try:
-                        result_json = json.loads(msg_content)
-                        url = result_json.get('url', 'unknown')
-                        
-                        # Store only URL and status
-                        item = {
-                            'url': url,
-                            'status': status
-                        }
-                        self.index_status_table.put_item(Item=item)
-    
-                        # Forward full message to another queue
-                        self.sqs.send_message(
-                            QueueUrl=self.search_success_output_queue_url,
-                            MessageBody=json.dumps(body)
-                        )
-    
-                        logging.info(f"[Search Success] Forwarded result: {result_json}")
-                    except json.JSONDecodeError:
-                        logging.error(f"[Search Success] Malformed result_json: {msg_content}")
-                else:
-                    url = msg_content  # This could be a query or a URL 
+                    self.forward_search_result_to_client(msg_content)
                     item = {
-                        'url': url,
-                        'status': status
+                        'id': json.loads(msg_content).get('url', 'unknown'),
+                        'status': status,
+                        'timestamp': timestamp
                     }
-                    self.index_status_table.put_item(Item=item)
-                    logging.info(f"[Indexer Feedback] {status}: {url}")
-    
-                # Delete processed message
+                else:
+                    item = {
+                        'id': msg_content,
+                        'status': status,
+                        'timestamp': timestamp
+                    }
+
+                if error:
+                    item['error'] = error
+
+                self.index_status_table.put_item(Item=item)
+                logging.info(f"[Indexer Feedback] {status}: {msg_content}")
+
                 self.sqs.delete_message(
                     QueueUrl=self.index_feedback_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
+    def forward_search_result_to_client(self, result_json_str):
+        try:
+            result_json = json.loads(result_json_str)
+            self.sqs.send_message(
+                QueueUrl=self.search_success_output_queue_url,
+                MessageBody=json.dumps(result_json)
+            )
+            logging.info(f"[Forwarded] Search result sent to client queue: {result_json}")
+        except json.JSONDecodeError:
+            logging.error(f"[Forwarded] Failed to decode result_json: {result_json_str}")
     def submit_seed_urls(self, seed_urls):
         for url in seed_urls:
             self.send_url_to_crawl_queue(url, depth=0)
-     def compute_index_search_error_rates(self):
+    def compute_index_search_error_rates(self):
         response = self.index_status_table.scan()
         items = response['Items']
 
