@@ -40,29 +40,33 @@ class MasterNode:
         self.TIMEOUT_SECONDS = 120
 
     def send_url_to_crawl_queue(self, url, depth=0):
-        if self.is_blocked_url(url):
-            logging.warning(f"[Master] Skipping blocked URL: {url}")
-            return
-        message = {
-            "url": url,
-            "depth": depth,
-            "max_depth": self.max_depth
-        }
-        self.sqs.send_message(
-            QueueUrl=self.crawl_queue_url,
-            MessageBody=json.dumps(message, cls=DecimalEncoder)
-        )
-        logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
+    if self.is_blocked_url(url):
+        logging.warning(f"[Master] Skipping blocked URL: {url}")
+        return
+    
+    assigned_at = datetime.now(timezone.utc).isoformat()
+    message = {
+        "url": url,
+        "depth": depth,
+        "max_depth": self.max_depth,
+        "assigned_at": assigned_at  # Include assigned_at in the message
+    }
+    self.sqs.send_message(
+        QueueUrl=self.crawl_queue_url,
+        MessageBody=json.dumps(message, cls=DecimalEncoder)
+    )
+    logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
 
-        self.task_table.put_item(
-            Item={
-                'url': url,
-                'assigned_at': datetime.now(timezone.utc).isoformat(),
-                'depth': depth,
-                'status': 'pending',
-                'retries': 0
-            }
-        )
+    self.task_table.put_item(
+        Item={
+            'url': url,
+            'assigned_at': assigned_at,  # Always include assigned_at
+            'depth': depth,
+            'status': 'pending',
+            'retries': 0
+        }
+    )
+       
     def monitor_client_requests(self):
         logging.info("[Monitor] Listening for client requests...")
         while True:
@@ -251,7 +255,7 @@ class MasterNode:
                 error = body.get('error', '')
                 assigned_at = body.get('assigned_at')
 
-                key = {'url': crawled_url, 'assigned_at': assigned_at} if assigned_at else {'url': crawled_url}
+                key = {'url': crawled_url, 'assigned_at': assigned_at} 
 
                 if status == 'success':
                     logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
