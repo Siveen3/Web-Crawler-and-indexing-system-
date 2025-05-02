@@ -60,10 +60,10 @@ class MasterNode:
             Item={
                 'url': url,
                 'assigned_at': assigned_at,  # Always include assigned_at
-                'depth': depth,
+                'depth':Decimal(str(depth)),
                 'domain': domain,
                 'status': 'pending',
-                'retries': 0
+                'retries': Decimal(str(0))
             }
         )
        
@@ -297,6 +297,8 @@ class MasterNode:
                 assigned_at = body.get('assigned_at')
                 domain = body.get('domain', None)
                 key = {'url': crawled_url} 
+                
+                    
 
                 if status == 'success':
                     logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
@@ -334,17 +336,20 @@ class MasterNode:
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={":s": "skipped"}
                     )
+                elif status == 'shutdown':
+                    logging.info(f"[{crawler_id}] {error}")
+
                 else:
                     logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
                     response = self.task_table.get_item(Key=key)
-                    retries = response.get('retries', 0)
+                    retries = response.get('Item', {}).get('retries', 0)
                     if retries < 3:
                         self.send_url_to_crawl_queue(crawled_url, domain , depth=depth)
                         self.task_table.update_item(
                             Key=key,
                             UpdateExpression="SET retries = :r, assigned_at = :t",
                             ExpressionAttributeValues={
-                                ":r": retries + 1,
+                                ":r": Decimal(str(retries + 1)),
                                 ":t": datetime.now(timezone.utc).isoformat()
                             }
                         )
@@ -404,9 +409,9 @@ class MasterNode:
                         Item={
                             'url': url,
                             'assigned_at': now.isoformat(),
-                            'depth': depth,
+                            'depth': Decimal(str(depth)),
                             'status': 'pending',
-                            'retries': retries + 1
+                            'retries': Decimal(str(retries + 1))
                         }
                     )
                 else:
