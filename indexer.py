@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 
 class Indexer:
-    def __init__(self, indexer_id, dynamodb_table, es_host, es_port, index_name, s3_bucket,	content_queue_url, 
+    def __init__(self, indexer_id, dynamodb_table, es, index_name, s3_bucket,	content_queue_url, 
                  search_queue_url, response_queue_url, region='us-east-1', delay=2):
 
         self.indexer_id = indexer_id
@@ -19,25 +19,29 @@ class Indexer:
 
 
         self.statuses = ['index_success', 'index_failure', 'search_success', 'search_failure']
-        self.es_host = es_host
-        self.es_port = es_port
+        
+        
+        # Initialize Elasticsearch
+        self.es = self.initialize_elasticsearch(es)
         self.index_name = index_name
-        self.delay = delay
-        self.region = region
 
+        # Initialize S3
         self.s3_bucket = s3_bucket
+
+        # Initialize SQS
         self.content_queue_url = content_queue_url
         self.search_queue_url = search_queue_url
         self.response_queue_url = response_queue_url
         
-        # Initialize Elasticsearch
-        self.es = self.initialize_elasticsearch()
         
         # Initialize clients
+        self.region = region
         self.sqs_content = boto3.client('sqs', region_name=region)
         self.sqs_search = boto3.client('sqs', region_name=region)
         self.sqs_response = boto3.client('sqs', region_name=region)
         self.s3 = boto3.client('s3', region_name=region)
+
+        self.delay = delay
 
         # Configure logging
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - Indexer - %(levelname)s - %(message)s')
@@ -55,8 +59,7 @@ class Indexer:
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
 
-    def initialize_elasticsearch(self):
-        es = Elasticsearch([{'host': self.es_host, 'port': self.es_port}])
+    def initialize_elasticsearch(self, es):
         if not es.indices.exists(index=self.index_name):
             index_settings = {
                 "settings": {
