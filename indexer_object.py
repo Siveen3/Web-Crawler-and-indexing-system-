@@ -1,4 +1,4 @@
-from indexer_node import Indexer
+from indexer import Indexer
 from elasticsearch import Elasticsearch
 import certifi
 
@@ -16,6 +16,7 @@ es = Elasticsearch(
     )
 
 indexer = Indexer(es=es,
+                  indexer_id="indexer_1",
                   index_name="content_index", 
                   dynamodb_table="CrawlerHeartbeatTable", 
                   s3_bucket="crawler-indexer-bucket", 

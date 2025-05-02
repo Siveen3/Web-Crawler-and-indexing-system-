@@ -67,7 +67,7 @@ class Client:
             )
 
 
-# Client object
+
 client = Client("https://sqs.us-east-1.amazonaws.com/-------------/RequestQueue", 
                 "https://sqs.us-east-1.amazonaws.com/------------/ResponseQueue")
 

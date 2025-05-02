@@ -7,6 +7,7 @@ from elasticsearch import Elasticsearch
 from datetime import datetime, timezone
 
 
+
 class Indexer:
     def __init__(self, indexer_id, dynamodb_table, es, index_name, s3_bucket,	content_queue_url, 
                  search_queue_url, response_queue_url, region='us-east-1', delay=2):
@@ -20,10 +21,9 @@ class Indexer:
 
         self.statuses = ['index_success', 'index_failure', 'search_success', 'search_failure']
         
-        
         # Initialize Elasticsearch
-        self.es = self.initialize_elasticsearch(es)
         self.index_name = index_name
+        self.es = self.initialize_elasticsearch(es)
 
         # Initialize S3
         self.s3_bucket = s3_bucket
@@ -44,7 +44,7 @@ class Indexer:
         self.delay = delay
 
         # Configure logging
-        logging.basicConfig(level=logging.INFO, format='%(asctime)s - Indexer - %(levelname)s - %(message)s')
+        logging.basicConfig(filename='indexer.log', filemode='w', level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
     def heartbeat(self):
         try:
