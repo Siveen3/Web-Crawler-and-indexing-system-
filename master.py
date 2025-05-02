@@ -62,7 +62,39 @@ class MasterNode:
                 'retries': 0
             }
         )
+     def monitor_client_requests(self):
+        logging.info("[Monitor] Listening for client requests...")
+        while True:
+            response = self.sqs.receive_message(
+                QueueUrl=self.request_queue_url,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=5
+            )
+            messages = response.get('Messages', [])
+            if not messages:
+                break
 
+            for message in messages:
+                body = json.loads(message['Body'])
+                msg_type = body.get('type')
+
+                if msg_type == 'search':
+                    self.sqs.send_message(
+                        QueueUrl=self.search_queue_url,
+                        MessageBody=json.dumps(body)
+                    )
+                    logging.info(f"[Request] Forwarded search query to search queue: {body}")
+                elif msg_type == 'crawl':
+                    self.sqs.send_message(
+                        QueueUrl=self.crawl_queue_url,
+                        MessageBody=json.dumps(body)
+                    )
+                    logging.info(f"[Request] Forwarded crawl request to crawl queue: {body}")
+
+                self.sqs.delete_message(
+                    QueueUrl=self.request_queue_url,
+                    ReceiptHandle=message['ReceiptHandle']
+                )
     def send_shutdown_signal_to_crawlers(self):
         logging.info("[Master] Sending shutdown signals to crawlers...")
         response = self.heartbeat_table.scan()
