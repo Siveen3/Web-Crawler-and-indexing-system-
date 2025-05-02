@@ -90,6 +90,24 @@ class MasterNode:
                     )
                     logging.info(f"[Request] Forwarded search query to search queue: {body}")
                 elif msg_type == 'crawl':
+                    url = body.get('url')
+                    domain = body.get('domain')
+                    depth = body.get('depth', 0)
+                    assigned_at = datetime.now(timezone.utc).isoformat()
+                    
+                    # Record in task table
+                    self.task_table.put_item(
+                        Item={
+                            'url': url,
+                            'assigned_at': assigned_at,
+                            'depth': depth,
+                            'domain': domain,
+                            'status': 'pending',
+                            'retries': 0
+                        }
+                    )
+                    
+                    # Forward to crawl queue
                     self.sqs.send_message(
                         QueueUrl=self.crawl_queue_url,
                         MessageBody=json.dumps(body)
@@ -296,7 +314,7 @@ class MasterNode:
                 else:
                     logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
                     response = self.task_table.get_item(Key=key)
-                    retries = response['Item'].get('retries', 0)
+                    retries = response.get('retries', 0)
                     if retries < 3:
                         self.send_url_to_crawl_queue(crawled_url, domain , depth=depth)
                         self.task_table.update_item(
@@ -350,11 +368,12 @@ class MasterNode:
             retries = item.get('retries', 0)
             url = item['url']
             depth = item['depth']
+            domain = item['domain']
 
             if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
                 if retries < 3:
                     logging.warning(f"[Timeout] Requeuing stale task: {url}")
-                    self.send_url_to_crawl_queue(url, depth=depth)
+                    self.send_url_to_crawl_queue(url, domain, depth=depth)
                     # Delete old item
                     self.task_table.delete_item(Key={'url': url})
                     # Put new item with updated assigned_at and incremented retries
