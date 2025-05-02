@@ -255,7 +255,7 @@ class MasterNode:
                 error = body.get('error', '')
                 assigned_at = body.get('assigned_at')
                 domain = body.get('domain', None)
-                key = {'url': crawled_url, 'assigned_at': assigned_at} 
+                key = {'url': crawled_url} 
 
                 if status == 'success':
                     logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
@@ -298,7 +298,7 @@ class MasterNode:
                     response = self.task_table.get_item(Key=key)
                     retries = response['Item'].get('retries', 0)
                     if retries < 3:
-                        self.send_url_to_crawl_queue(crawled_url, depth=depth)
+                        self.send_url_to_crawl_queue(crawled_url, domain , depth=depth)
                         self.task_table.update_item(
                             Key=key,
                             UpdateExpression="SET retries = :r, assigned_at = :t",
@@ -356,7 +356,7 @@ class MasterNode:
                     logging.warning(f"[Timeout] Requeuing stale task: {url}")
                     self.send_url_to_crawl_queue(url, depth=depth)
                     # Delete old item
-                    self.task_table.delete_item(Key={'url': url, 'assigned_at': assigned_at})
+                    self.task_table.delete_item(Key={'url': url})
                     # Put new item with updated assigned_at and incremented retries
                     self.task_table.put_item(
                         Item={
@@ -370,7 +370,7 @@ class MasterNode:
                 else:
                     self.send_to_dead_letter_queue(url, reason="timeout and max retries exceeded")
                     self.task_table.update_item(
-                        Key={'url': url, 'assigned_at': assigned_at},
+                        Key={'url': url},
                         UpdateExpression="SET #s = :s",
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={":s": "failed"}
@@ -421,7 +421,7 @@ if __name__ == "__main__":
         crawl_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/CrawlQueue',
         report_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/ReportQueue',
         heartbeat_table_name='CrawlerHeartbeatTable',
-        task_table_name='CrawlerTaskAssignments',
+        task_table_name='CrawlerTaskAssignmets',
         dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/DeadLetterQueue',
         blocked_table_name='BlockedUrlsTable',
         index_feedback_queue_url = 'https://sqs.us-east-1.amazonaws.com/138749495090/FeedbackQueue',
@@ -433,3 +433,4 @@ if __name__ == "__main__":
 
     logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
+    ####
