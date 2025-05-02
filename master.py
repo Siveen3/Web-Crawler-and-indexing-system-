@@ -32,11 +32,11 @@ class MasterNode:
          self.blocked_table = self.dynamodb.Table(blocked_table_name)
          self.index_status_table = self.dynamodb.Table(self.index_status_table_name)
          self.search_queue_url = search_queue_url
- 
+         
+         self.TIMEOUT_SECONDS = 120
          logging.basicConfig(filename='master_log.log', level=logging.INFO,
                              format='%(asctime)s [%(levelname)s] %(message)s')
  
-        self.TIMEOUT_SECONDS = 120
 
     def send_url_to_crawl_queue(self, url, domain, depth=0):
         if self.is_blocked_url(url):
