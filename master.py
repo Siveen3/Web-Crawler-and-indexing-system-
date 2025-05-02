@@ -395,8 +395,8 @@ class MasterNode:
 
             retries = item.get('retries', 0)
             url = item['url']
-            depth = item['depth']
-            domain = item['domain']
+            depth = item.get('depth', 0)  # Default to 0 if not present
+            domain = item.get('domain', '')  # Default to empty string if not present
 
             if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
                 if retries < 3:
@@ -405,15 +405,16 @@ class MasterNode:
                     # Delete old item
                     self.task_table.delete_item(Key={'url': url})
                     # Put new item with updated assigned_at and incremented retries
-                    self.task_table.put_item(
-                        Item={
-                            'url': url,
-                            'assigned_at': now.isoformat(),
-                            'depth': Decimal(str(depth)),
-                            'status': 'pending',
-                            'retries': Decimal(str(retries + 1))
-                        }
-                    )
+                    new_item = {
+                        'url': url,
+                        'assigned_at': now.isoformat(),
+                        'depth': Decimal(str(depth)),
+                        'status': 'pending',
+                        'retries': Decimal(str(retries + 1))
+                    }
+                    if domain:  # Only include domain if it exists
+                        new_item['domain'] = domain
+                    self.task_table.put_item(Item=new_item)
                 else:
                     self.send_to_dead_letter_queue(url, reason="timeout and max retries exceeded")
                     self.task_table.update_item(
