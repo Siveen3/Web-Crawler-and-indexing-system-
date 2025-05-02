@@ -56,16 +56,15 @@ class MasterNode:
         )
         logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
     
-        self.task_table.put_item(
-            Item={
-                'url': url,
-                'assigned_at': assigned_at,  # Always include assigned_at
-                'depth':Decimal(str(depth)),
-                'domain': domain,
-                'status': 'pending',
-                'retries': Decimal(str(0))
-            }
-        )
+        task_item = {
+            'url': url,
+            'assigned_at': assigned_at,
+            'depth': Decimal(str(depth)),
+            'status': 'pending',
+            'retries': Decimal(str(0)),
+            'domain': domain  # Ensure domain is always included
+        }
+        self.task_table.put_item(Item=task_item)
        
     def wake_up_crawler(self, crawler_id):
         """Wake up a specific crawler by sending a wake-up signal"""
