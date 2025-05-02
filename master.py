@@ -12,9 +12,9 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(o)
 
 class MasterNode:
-   def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name,
+    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name,
                   task_table_name, dead_letter_queue_url, blocked_table_name, index_feedback_queue_url,
-                  index_status_table_name, search_success_output_queue_url, max_depth=2):
+                  index_status_table_name, ResponseQueue, request_queue_url,search_queue_url, max_depth=2):
         self.region_name = region_name
         self.crawl_queue_url = crawl_queue_url
         self.report_queue_url = report_queue_url
@@ -23,15 +23,16 @@ class MasterNode:
         self.dead_letter_queue_url = dead_letter_queue_url
         self.index_feedback_queue_url = index_feedback_queue_url
         self.index_status_table_name = index_status_table_name
-        self.search_success_output_queue_url = search_success_output_queue_url
+        self.ResponseQueue = ResponseQueue
         self.max_depth = max_depth
-
+        self.request_queue_url = request_queue_url
         self.sqs = boto3.client('sqs', region_name=self.region_name)
         self.dynamodb = boto3.resource('dynamodb', region_name=self.region_name)
         self.heartbeat_table = self.dynamodb.Table(self.heartbeat_table_name)
         self.task_table = self.dynamodb.Table(self.task_table_name)
         self.blocked_table = self.dynamodb.Table(blocked_table_name)
         self.index_status_table = self.dynamodb.Table(self.index_status_table_name)
+        self.search_queue_url = search_queue_url
 
         logging.basicConfig(filename='master_log.log', level=logging.INFO,
                             format='%(asctime)s [%(levelname)s] %(message)s')
@@ -62,7 +63,7 @@ class MasterNode:
                 'retries': 0
             }
         )
-     def monitor_client_requests(self):
+    def monitor_client_requests(self):
         logging.info("[Monitor] Listening for client requests...")
         while True:
             response = self.sqs.receive_message(
@@ -157,15 +158,13 @@ class MasterNode:
         try:
             result_json = json.loads(result_json_str)
             self.sqs.send_message(
-                QueueUrl=self.search_success_output_queue_url,
+                QueueUrl=self.ResponseQueue,
                 MessageBody=json.dumps(result_json)
             )
             logging.info(f"[Forwarded] Search result sent to client queue: {result_json}")
         except json.JSONDecodeError:
             logging.error(f"[Forwarded] Failed to decode result_json: {result_json_str}")
-    def submit_seed_urls(self, seed_urls):
-        for url in seed_urls:
-            self.send_url_to_crawl_queue(url, depth=0)
+
     def compute_index_search_error_rates(self):
         response = self.index_status_table.scan()
         items = response['Items']
@@ -391,16 +390,13 @@ if __name__ == "__main__":
         task_table_name='CrawlerTaskAssignments',
         dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/DeadLetterQueue',
         blocked_table_name='BlockedUrlsTable',
-        max_depth=2
-    )
+        index_feedback_queue_url = 'https://sqs.us-east-1.amazonaws.com/138749495090/FeedbackQueue',
+        request_queue_url= 'https://sqs.us-east-1.amazonaws.com/138749495090/RequestQueue',
+        ResponseQueue= 'https://sqs.us-east-1.amazonaws.com/138749495090/ResponseQueue',
+        search_queue_url = 'https://sqs.us-east-1.amazonaws.com/138749495090/SearchQueue',
+        index_status_table_name = 'IndexerTaskAssignments',
+        max_depth=2)
 
-    BATCH_SEED_URLS = [
-        "http://siveen.com",
-        "http://soso.com/about",
-        "http://hfffff.com/contact"
-    ]
-
-    logging.info("[Master] Submitting Seed URLs to CrawlQueue...")
-    master.submit_seed_urls(BATCH_SEED_URLS)
+    master.monitor_client_requests()
     logging.info("[Master] Monitoring CrawlQueue and Crawler Health...")
     master.monitor_crawl_queue()
