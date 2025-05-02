@@ -151,15 +151,16 @@ class Crawler:
         return title, text_content, meta_description, canonical_url, urls
 
 
-    def send_to_master(self, url, extracted_urls, depth, status, error=None, assigned_at=None):
+    def send_to_master(self, url, extracted_urls, depth, status, error=None, assigned_at=None, domain=None):
         # Send crawl results (urls and status) to the master queue.
         message = {
             "crawler_id": self.crawler_id,
             "status": status,
+            "error": error,
             "url": url,
             "extracted_urls": extracted_urls,
             "depth": depth,
-            "error": error,
+            "domain": domain,
             "assigned_at": assigned_at,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
@@ -255,7 +256,7 @@ class Crawler:
                     title, text_content, meta_description, canonical_url, extracted_urls = self.extract_content(html_content, url, domain)
                     logging.info(f"Finished processing URL: {url}")
 
-                    self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, assigned_at=assigned_at)
+                    self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, domain=domain, assigned_at=assigned_at)
                     logging.info(f"Reported successful URL to master: {url}")
                     s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content)
                     if s3_key:
