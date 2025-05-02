@@ -17,11 +17,12 @@ class Client:
         except ClientError as e:
             raise Exception(f"Failed to initialize SQS client: {str(e)}")
 
-    def send_search_query(self, query):
+    def send_search_query(self, query, mode="and"):
         message = {
             "type": "search",
             "query": query,
             "url": None,
+            "mode": mode,
             "depth": None,
             "max_depth": None
         }
@@ -81,9 +82,10 @@ def index():
 @app.route('/search', methods=['POST'])
 def search():
     query = request.form['query']
+    mode = request.form.get('search_mode', 'and')
     client.send_search_query(query)
     results = client.receive_search_results()
-    return render_template('index.html', query=query, results=results)
+    return render_template('index.html', query=query, results=results , selected_mode=mode)
 
 @app.route('/crawl', methods=['POST'])
 def crawl():
