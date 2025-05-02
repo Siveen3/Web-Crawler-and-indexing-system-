@@ -128,7 +128,29 @@ class MasterNode:
     def submit_seed_urls(self, seed_urls):
         for url in seed_urls:
             self.send_url_to_crawl_queue(url, depth=0)
+     def compute_index_search_error_rates(self):
+        response = self.index_status_table.scan()
+        items = response['Items']
 
+        index_success = sum(1 for item in items if item['status'] == 'index_success')
+        index_failed = sum(1 for item in items if item['status'] == 'index_failed')
+        search_success = sum(1 for item in items if item['status'] == 'search_success')
+        search_failed = sum(1 for item in items if item['status'] == 'search_failed')
+
+        total_index = index_success + index_failed
+        total_search = search_success + search_failed
+
+        if total_index > 0:
+            print(f"Indexing Error Rate: {(index_failed / total_index) * 100:.2f}%")
+        else:
+            print("Indexing Error Rate: 0.00%")
+
+        if total_search > 0:
+            print(f"Search Error Rate: {(search_failed / total_search) * 100:.2f}%")
+        else:
+            print("Search Error Rate: 0.00%")
+
+        print(f"Total Indexed URLs: {index_success}")
     def monitor_crawl_queue(self):
         while True:
             response = self.sqs.get_queue_attributes(
