@@ -268,6 +268,12 @@ class MasterNode:
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={":s": "done"}
                     )
+                    self.task_table.update_item(
+                        Key={'url': crawled_url},  # Only using url as key if that's the primary key
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "done"}
+                    )
                 elif status == 'skipped':
                     logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
                     self.blocked_table.put_item(Item={
@@ -277,6 +283,12 @@ class MasterNode:
                     })
                     self.task_table.update_item(
                         Key=key,
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "skipped"}
+                    )
+                    self.task_table.update_item(
+                        Key={'url': crawled_url},  # Only using url as key
                         UpdateExpression="SET #s = :s",
                         ExpressionAttributeNames={"#s": "status"},
                         ExpressionAttributeValues={":s": "skipped"}
