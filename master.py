@@ -3,6 +3,13 @@ import json
 import time
 import logging
 from datetime import datetime, timezone
+from decimal import Decimal
+
+class DecimalEncoder(json.JSONEncoder):
+    def default(self, o):
+        if isinstance(o, Decimal):
+            return float(o)
+        return super(DecimalEncoder, self).default(o)
 
 class MasterNode:
     def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name,
@@ -38,17 +45,17 @@ class MasterNode:
         }
         self.sqs.send_message(
             QueueUrl=self.crawl_queue_url,
-            MessageBody=json.dumps(message)
+            MessageBody=json.dumps(message, cls=DecimalEncoder)
         )
         logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
 
         self.task_table.put_item(
             Item={
                 'url': url,
+                'assigned_at': datetime.now(timezone.utc).isoformat(),
                 'depth': depth,
                 'status': 'pending',
-                'retries': 0,
-                'assigned_at': datetime.now(timezone.utc).isoformat()
+                'retries': 0
             }
         )
 
@@ -63,7 +70,7 @@ class MasterNode:
             }
             self.sqs.send_message(
                 QueueUrl=self.crawl_queue_url,
-                MessageBody=json.dumps(shutdown_message)
+                MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
             )
             logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
 
@@ -105,9 +112,9 @@ class MasterNode:
 
             if time_diff > 120:
                 logging.warning(f"[Warning] {crawler_id} missed heartbeat! Last seen {int(time_diff)} seconds ago.")
-            
             else:
                 logging.info(f"[Info] {crawler_id} is alive (last seen {int(time_diff)} seconds ago).")
+
     def count_crawled_urls(self):
         scanned = self.task_table.scan()
         done = sum(1 for item in scanned['Items'] if item['status'] == 'done')
@@ -125,133 +132,143 @@ class MasterNode:
             print(f"Error rate: {error_rate:.2f}%")
         else:
             print("Error rate: 0.00%")
-    
+
     def monitor_crawler_reports(self):
-            logging.info("[Monitor] Checking crawler reports...")
-            while True:
-                response = self.sqs.receive_message(
-                    QueueUrl=self.report_queue_url,
-                    MaxNumberOfMessages=10,
-                    WaitTimeSeconds=5
-                )
-                messages = response.get('Messages', [])
-                if not messages:
-                    break
-
-                for message in messages:
-                    body = json.loads(message['Body'])
-                    crawler_id = body.get('crawler_id', 'unknown')
-                    crawled_url = body.get('url', 'unknown')
-                    extracted_urls = body.get('extracted_urls', [])
-                    depth = body.get('depth') or 0
-                    status = body.get('status', 'unknown')
-                    error = body.get('error', '')
-
-                    if status == 'success':
-                        logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
-                        if depth < self.max_depth:
-                            for url in extracted_urls:
-                                self.send_url_to_crawl_queue(url, depth=depth+1)
-                        self.task_table.update_item(
-                            Key={'url': crawled_url},
-                            UpdateExpression="SET #s = :s",
-                            ExpressionAttributeNames={"#s": "status"},
-                            ExpressionAttributeValues={":s": "done"}
-                        )
-                    elif status == 'skipped':
-                        logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
-                        self.blocked_table.put_item(Item={
-                            'url': crawled_url,
-                            'reason': error,
-                            'timestamp': datetime.now(timezone.utc).isoformat()
-                        })
-                        self.task_table.update_item(
-                            Key={'url': crawled_url},
-                            UpdateExpression="SET #s = :s",
-                            ExpressionAttributeNames={"#s": "status"},
-                            ExpressionAttributeValues={":s": "skipped"}
-                        )
-                    else:
-                        logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
-                        response = self.task_table.get_item(Key={'url': crawled_url})
-                        retries = response['Item'].get('retries', 0)
-                        if retries < 3:
-                            self.send_url_to_crawl_queue(crawled_url, depth=depth)
-                            self.task_table.update_item(
-                                Key={'url': crawled_url},
-                                UpdateExpression="SET retries = :r, assigned_at = :t",
-                                ExpressionAttributeValues={
-                                    ":r": retries + 1,
-                                    ":t": datetime.now(timezone.utc).isoformat()
-                                }
-                            )
-                        else:
-                            self.send_to_dead_letter_queue(crawled_url, reason=error)
-                            self.task_table.update_item(
-                                Key={'url': crawled_url},
-                                UpdateExpression="SET #s = :s",
-                                ExpressionAttributeNames={"#s": "status"},
-                                ExpressionAttributeValues={":s": "failed"}
-                            )
-
-                    self.sqs.delete_message(
-                        QueueUrl=self.report_queue_url,
-                        ReceiptHandle=message['ReceiptHandle']
-                    )
-
-    def send_to_dead_letter_queue(self, url, reason="max retries exceeded"):
-            message = {
-                "url": url,
-                "reason": reason,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            self.sqs.send_message(
-                QueueUrl=self.dead_letter_queue_url,
-                MessageBody=json.dumps(message)
+        logging.info("[Monitor] Checking crawler reports...")
+        while True:
+            response = self.sqs.receive_message(
+                QueueUrl=self.report_queue_url,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=5
             )
-            logging.warning(f"[DLQ] Sent URL to dead-letter queue: {url}")
+            messages = response.get('Messages', [])
+            if not messages:
+                break
 
-    def monitor_task_timeouts(self):
-            logging.info("[Monitor] Checking for task timeouts...")
-            now = datetime.now(timezone.utc)
+            for message in messages:
+                body = json.loads(message['Body'])
+                crawler_id = body.get('crawler_id', 'unknown')
+                crawled_url = body.get('url', 'unknown')
+                extracted_urls = body.get('extracted_urls', [])
+                depth = body.get('depth') or 0
+                status = body.get('status', 'unknown')
+                error = body.get('error', '')
+                assigned_at = body.get('assigned_at')
 
-            response = self.task_table.scan()
-            for item in response['Items']:
-                status = item.get('status', '')
-                if status != 'pending':
-                    continue
+                key = {'url': crawled_url, 'assigned_at': assigned_at} if assigned_at else {'url': crawled_url}
 
-                assigned_at = datetime.fromisoformat(item['assigned_at'])
-                retries = item.get('retries', 0)
-                url = item['url']
-                depth = item['depth']
-
-                if (now - assigned_at).total_seconds() > self.TIMEOUT_SECONDS:
+                if status == 'success':
+                    logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
+                    if depth < self.max_depth:
+                        for url in extracted_urls:
+                            self.send_url_to_crawl_queue(url, depth=depth+1)
+                    self.task_table.update_item(
+                        Key=key,
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "done"}
+                    )
+                elif status == 'skipped':
+                    logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
+                    self.blocked_table.put_item(Item={
+                        'url': crawled_url,
+                        'reason': error,
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    })
+                    self.task_table.update_item(
+                        Key=key,
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "skipped"}
+                    )
+                else:
+                    logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
+                    response = self.task_table.get_item(Key=key)
+                    retries = response['Item'].get('retries', 0)
                     if retries < 3:
-                        logging.warning(f"[Timeout] Requeuing stale task: {url}")
-                        self.send_url_to_crawl_queue(url, depth=depth)
+                        self.send_url_to_crawl_queue(crawled_url, depth=depth)
                         self.task_table.update_item(
-                            Key={'url': url},
-                            UpdateExpression="SET assigned_at = :t, retries = :r",
+                            Key=key,
+                            UpdateExpression="SET retries = :r, assigned_at = :t",
                             ExpressionAttributeValues={
-                                ":t": now.isoformat(),
-                                ":r": retries + 1
+                                ":r": retries + 1,
+                                ":t": datetime.now(timezone.utc).isoformat()
                             }
                         )
                     else:
-                        logging.error(f"[Fail] Task {url} exceeded retry limit. Sending to DLQ.")
-                        self.send_to_dead_letter_queue(url, reason="timeout exceeded")
+                        self.send_to_dead_letter_queue(crawled_url, reason=error)
                         self.task_table.update_item(
-                            Key={'url': url},
+                            Key=key,
                             UpdateExpression="SET #s = :s",
                             ExpressionAttributeNames={"#s": "status"},
                             ExpressionAttributeValues={":s": "failed"}
                         )
 
+                self.sqs.delete_message(
+                    QueueUrl=self.report_queue_url,
+                    ReceiptHandle=message['ReceiptHandle']
+                )
+
+    def send_to_dead_letter_queue(self, url, reason="max retries exceeded"):
+        message = {
+            "url": url,
+            "reason": reason,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        self.sqs.send_message(
+            QueueUrl=self.dead_letter_queue_url,
+            MessageBody=json.dumps(message, cls=DecimalEncoder)
+        )
+        logging.warning(f"[DLQ] Sent URL to dead-letter queue: {url}")
+
+    
+    def monitor_task_timeouts(self):
+        logging.info("[Monitor] Checking for task timeouts...")
+        now = datetime.now(timezone.utc)
+
+        response = self.task_table.scan()
+        for item in response['Items']:
+            status = item.get('status', '')
+            if status != 'pending':
+                continue
+
+            assigned_at = item.get('assigned_at')
+            if not assigned_at:
+                continue
+
+            retries = item.get('retries', 0)
+            url = item['url']
+            depth = item['depth']
+
+            if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
+                if retries < 3:
+                    logging.warning(f"[Timeout] Requeuing stale task: {url}")
+                    self.send_url_to_crawl_queue(url, depth=depth)
+                    # Delete old item
+                    self.task_table.delete_item(Key={'url': url, 'assigned_at': assigned_at})
+                    # Put new item with updated assigned_at and incremented retries
+                    self.task_table.put_item(
+                        Item={
+                            'url': url,
+                            'assigned_at': now.isoformat(),
+                            'depth': depth,
+                            'status': 'pending',
+                            'retries': retries + 1
+                        }
+                    )
+                else:
+                    logging.error(f"[Fail] Task {url} exceeded retry limit. Sending to DLQ.")
+                    self.send_to_dead_letter_queue(url, reason="timeout exceeded")
+                    self.task_table.update_item(
+                        Key={'url': url, 'assigned_at': assigned_at},
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "failed"}
+                    )
 
     def is_blocked_url(self, url):
-            response = self.blocked_table.get_item(Key={'url': url})
-            return 'Item' in response
+        response = self.blocked_table.get_item(Key={'url': url})
+        return 'Item' in response
 
 
 if __name__ == "__main__":
@@ -262,7 +279,7 @@ if __name__ == "__main__":
         heartbeat_table_name='CrawlerHeartbeatTable',
         task_table_name='CrawlerTaskAssignments',
         dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/DeadLetterQueue',
-        blocked_table_name = 'BlockedUrlsTable',
+        blocked_table_name='BlockedUrlsTable',
         max_depth=2
     )
 
