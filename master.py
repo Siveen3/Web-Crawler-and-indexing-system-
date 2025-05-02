@@ -333,7 +333,6 @@ class MasterNode:
         )
         logging.warning(f"[DLQ] Sent URL to dead-letter queue: {url}")
 
-    
     def monitor_task_timeouts(self):
         logging.info("[Monitor] Checking for task timeouts...")
         now = datetime.now(timezone.utc)
@@ -351,12 +350,11 @@ class MasterNode:
             retries = item.get('retries', 0)
             url = item['url']
             depth = item['depth']
-            domain = item['domain']
 
             if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
                 if retries < 3:
                     logging.warning(f"[Timeout] Requeuing stale task: {url}")
-                    self.send_url_to_crawl_queue(url, domain, depth=depth)
+                    self.send_url_to_crawl_queue(url, depth=depth)
                     # Delete old item
                     self.task_table.delete_item(Key={'url': url, 'assigned_at': assigned_at})
                     # Put new item with updated assigned_at and incremented retries
@@ -370,8 +368,7 @@ class MasterNode:
                         }
                     )
                 else:
-                    logging.error(f"[Fail] Task {url} exceeded retry limit. Sending to DLQ.")
-                    self.send_to_dead_letter_queue(url, reason="timeout exceeded")
+                    self.send_to_dead_letter_queue(url, reason="timeout and max retries exceeded")
                     self.task_table.update_item(
                         Key={'url': url, 'assigned_at': assigned_at},
                         UpdateExpression="SET #s = :s",
