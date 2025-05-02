@@ -88,7 +88,7 @@ class Crawler:
             logging.info(f"Saved crawled URL: {url} to crawled_table")
         except Exception as e:
             logging.error(f"Failed to save crawled URL: {url} | Error: {e}")
-            self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error=f"Failed to save to crawled_table: {e}")
+            self.send_to_master(url=url, extracted_urls=[], depth=-1, status="failed", error=f"Failed to save to crawled_table: {e}")
             
 
     def is_allowed_by_robots(self, url):
@@ -151,7 +151,7 @@ class Crawler:
         return title, text_content, meta_description, canonical_url, urls
 
 
-    def send_to_master(self, url, extracted_urls, depth, status, error=None):
+    def send_to_master(self, url, extracted_urls, depth, status, error=None, assigned_at=None):
         # Send crawl results (urls and status) to the master queue.
         message = {
             "crawler_id": self.crawler_id,
@@ -160,6 +160,7 @@ class Crawler:
             "extracted_urls": extracted_urls,
             "depth": depth,
             "error": error,
+            "assigned_at": assigned_at,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
@@ -239,7 +240,7 @@ class Crawler:
             url = body.get('url')
             depth = body.get('depth', 0)
             domain = body.get('domain')
-
+            assigned_at = body.get('assigned_at')
             logging.info(f"Processing URL: {url}")
 
             if not self.is_allowed_by_robots(url):
@@ -254,7 +255,7 @@ class Crawler:
                     title, text_content, meta_description, canonical_url, extracted_urls = self.extract_content(html_content, url, domain)
                     logging.info(f"Finished processing URL: {url}")
 
-                    self.send_to_master(url=url, extracted_urls=extracted_urls, depth=depth, status="success")
+                    self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, assigned_at=assigned_at)
                     logging.info(f"Reported successful URL to master: {url}")
                     s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content)
                     if s3_key:
