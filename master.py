@@ -73,7 +73,58 @@ class MasterNode:
                 MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
             )
             logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
-
+     def monitor_indexer_feedback(self):
+        logging.info("[Monitor] Checking indexer feedback queue...")
+        while True:
+            response = self.sqs.receive_message(
+                QueueUrl=self.index_feedback_queue_url,
+                MaxNumberOfMessages=10,
+                WaitTimeSeconds=5
+            )
+            messages = response.get('Messages', [])
+            if not messages:
+                break
+    
+            for message in messages:
+                body = json.loads(message['Body'])
+                status = body.get('status')
+                msg_content = body.get('message')
+    
+                if status == "search_success":
+                    try:
+                        result_json = json.loads(msg_content)
+                        url = result_json.get('url', 'unknown')
+                        
+                        # Store only URL and status
+                        item = {
+                            'url': url,
+                            'status': status
+                        }
+                        self.index_status_table.put_item(Item=item)
+    
+                        # Forward full message to another queue
+                        self.sqs.send_message(
+                            QueueUrl=self.search_success_output_queue_url,
+                            MessageBody=json.dumps(body)
+                        )
+    
+                        logging.info(f"[Search Success] Forwarded result: {result_json}")
+                    except json.JSONDecodeError:
+                        logging.error(f"[Search Success] Malformed result_json: {msg_content}")
+                else:
+                    url = msg_content  # This could be a query or a URL 
+                    item = {
+                        'url': url,
+                        'status': status
+                    }
+                    self.index_status_table.put_item(Item=item)
+                    logging.info(f"[Indexer Feedback] {status}: {url}")
+    
+                # Delete processed message
+                self.sqs.delete_message(
+                    QueueUrl=self.index_feedback_queue_url,
+                    ReceiptHandle=message['ReceiptHandle']
+                )
     def submit_seed_urls(self, seed_urls):
         for url in seed_urls:
             self.send_url_to_crawl_queue(url, depth=0)
