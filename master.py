@@ -188,27 +188,13 @@ class MasterNode:
             print("Search Error Rate: 0.00%")
 
         print(f"Total Indexed URLs: {index_success}")
+    
     def monitor_crawl_queue(self):
+        """Main monitoring loop that runs all monitoring tasks periodically"""
         while True:
-            response = self.sqs.get_queue_attributes(
-                QueueUrl=self.crawl_queue_url,
-                AttributeNames=['ApproximateNumberOfMessages']
-            )
-            num_messages = int(response['Attributes']['ApproximateNumberOfMessages'])
-            logging.info(f"[Monitor] Remaining URLs in queue: {num_messages}")
-
-            self.monitor_crawlers_health()
-            self.monitor_crawler_reports()
-            self.monitor_task_timeouts()
-         
-            if num_messages == 0:
-                logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
-                self.send_shutdown_signal_to_crawlers()
-                self.count_crawled_urls()
-                self.compute_error_rate()
-                break
-
+            self.run_all_monitoring_tasks()
             time.sleep(30)
+
 
     def monitor_crawlers_health(self):
         logging.info("[Monitor] Checking crawler heartbeats...")
@@ -380,7 +366,41 @@ class MasterNode:
         response = self.blocked_table.get_item(Key={'url': url})
         return 'Item' in response
 
+    def run_all_monitoring_tasks(self):
+        
+        """Run all monitoring tasks in sequence"""
+        logging.info("[Master] Starting comprehensive monitoring cycle")
+        
+        # Monitor client requests
+        self.monitor_client_requests()
+        
+        # Monitor crawler health and reports
+        self.monitor_crawlers_health()
+        self.monitor_crawler_reports()
+        
+        # Monitor task timeouts
+        self.monitor_task_timeouts()
+        
+        # Monitor indexer feedback
+        self.monitor_indexer_feedback()
+        
+        # Monitor crawl queue status
+        response = self.sqs.get_queue_attributes(
+            QueueUrl=self.crawl_queue_url,
+            AttributeNames=['ApproximateNumberOfMessages']
+        )
+        num_messages = int(response['Attributes']['ApproximateNumberOfMessages'])
+        logging.info(f"[Monitor] Remaining URLs in queue: {num_messages}")
+        
+        # If queue is empty, perform completion tasks
+        if num_messages == 0:
+            logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
+            self.send_shutdown_signal_to_crawlers()
+            self.count_crawled_urls()
+            self.compute_error_rate()
+            self.compute_index_search_error_rates()
 
+    
 if __name__ == "__main__":
     master = MasterNode(
         region_name='us-east-1',
@@ -397,6 +417,5 @@ if __name__ == "__main__":
         index_status_table_name = 'IndexerTaskAssignments',
         max_depth=2)
 
-    master.monitor_client_requests()
-    logging.info("[Master] Monitoring CrawlQueue and Crawler Health...")
+    logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
