@@ -349,6 +349,14 @@
                     <textarea id="seeds" name="seeds" placeholder="Enter one URL per line (e.g., https://example.com)" required>{% if seed_urls %}{{ '\n'.join(seed_urls) }}{% endif %}</textarea>
                     <small style="color: var(--text-light); display: block; margin-top: 0.3rem;">For best results, include complete URLs with protocol (http:// or https://)</small>
                 </div>
+                <div class="form-group">
+                    <label for="depth">Depth Limit:</label>
+                    <input type="number" id="depth" name="depth" min="1" max="10" value="2" required>
+                </div>
+                <div class="form-group">
+                    <label for="domain">Domain Restriction </label>
+                    <input type="text" id="domain" name="domain" placeholder="e.g., example.com">
+                </div>
                 <button type="submit">🚀 Submit Seed URLs</button>
             </form>
             

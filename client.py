@@ -52,14 +52,15 @@ class Client:
                 return body
         return []
 
-    def submit_seed_urls(self, seed_urls, max_depth=2):
+    def submit_seed_urls(self, seed_urls, max_depth=2, domain=None):
         for url in seed_urls:
             message = {
                 "type": "crawl",
                 "query": None,
                 "url": url,
                 "depth": 0,
-                "max_depth": max_depth
+                "max_depth": max_depth,
+                "domain": domain
             }
             self.sqs.send_message(
                 QueueUrl=self.request_queue_url,
@@ -90,7 +91,9 @@ def search():
 @app.route('/crawl', methods=['POST'])
 def crawl():
     seed_urls = request.form['seeds'].splitlines()
-    client.submit_seed_urls(seed_urls)
+    depth = int(request.form.get('depth', 2))
+    domain = request.form.get('domain', None)
+    client.submit_seed_urls(seed_urls, max_depth=depth, domain=domain)
     return render_template('index.html', message="Seed URLs submitted!", seed_urls=seed_urls)
 
 if __name__ == '__main__':
