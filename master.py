@@ -56,15 +56,16 @@ class MasterNode:
         )
         logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
     
-        task_item = {
-            'url': url,
-            'assigned_at': assigned_at,
-            'depth': Decimal(str(depth)),
-            'status': 'pending',
-            'retries': Decimal(str(0)),
-            'domain': domain  # Ensure domain is always included
-        }
-        self.task_table.put_item(Item=task_item)
+        self.task_table.put_item(
+            Item={
+                'url': url,
+                'assigned_at': assigned_at,  # Always include assigned_at
+                'depth':Decimal(str(depth)),
+                'domain': domain,
+                'status': 'pending',
+                'retries': Decimal(str(0))
+            }
+        )
        
     def wake_up_crawler(self, crawler_id):
         """Wake up a specific crawler by sending a wake-up signal"""
@@ -121,10 +122,10 @@ class MasterNode:
                         Item={
                             'url': url,
                             'assigned_at': assigned_at,
-                            'depth': depth,
+                            'depth': Decimal(str(depth)),
                             'domain': domain,
                             'status': 'pending',
-                            'retries': 0
+                            'retries': Decimal(str(0))
                         }
                     )
                     
@@ -177,13 +178,13 @@ class MasterNode:
                 if status == "search_success":
                     self.forward_search_result_to_client(msg_content)
                     item = {
-                        'id': json.loads(msg_content).get('url', 'unknown'),
+                        'url': json.loads(msg_content).get('url', 'unknown'),
                         'status': status,
                         'timestamp': timestamp
                     }
                 else:
                     item = {
-                        'id': msg_content,
+                        'url': msg_content,
                         'status': status,
                         'timestamp': timestamp
                     }
@@ -288,12 +289,11 @@ class MasterNode:
             for message in messages:
                 body = json.loads(message['Body'])
                 crawler_id = body.get('crawler_id', 'unknown')
-                crawled_url = body.get('url', 'unknown')
+                crawled_url = body.get('url', '')
                 extracted_urls = body.get('extracted_urls', [])
                 depth = body.get('depth') or 0
                 status = body.get('status', 'unknown')
                 error = body.get('error', '')
-                assigned_at = body.get('assigned_at')
                 domain = body.get('domain', None)
                 key = {'url': crawled_url} 
                 
@@ -340,7 +340,8 @@ class MasterNode:
 
                 else:
                     logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
-                    response = self.task_table.get_item(Key=key)
+                    print("Looking up DynamoDB item with key:", key)
+                    response = self.task_table.get_item(Key= {'url': crawled_url})
                     retries = response.get('Item', {}).get('retries', 0)
                     if retries < 3:
                         self.send_url_to_crawl_queue(crawled_url, domain , depth=depth)
@@ -393,9 +394,9 @@ class MasterNode:
                 continue
 
             retries = item.get('retries', 0)
-            url = item['url']
-            depth = item.get('depth', 0)  # Default to 0 if not present
-            domain = item.get('domain', '')  # Default to empty string if not present
+            url = item.get('url')
+            depth = item.get('depth')
+            domain = item.get('domain', None)
 
             if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
                 if retries < 3:
@@ -404,16 +405,15 @@ class MasterNode:
                     # Delete old item
                     self.task_table.delete_item(Key={'url': url})
                     # Put new item with updated assigned_at and incremented retries
-                    new_item = {
-                        'url': url,
-                        'assigned_at': now.isoformat(),
-                        'depth': Decimal(str(depth)),
-                        'status': 'pending',
-                        'retries': Decimal(str(retries + 1))
-                    }
-                    if domain:  # Only include domain if it exists
-                        new_item['domain'] = domain
-                    self.task_table.put_item(Item=new_item)
+                    self.task_table.put_item(
+                        Item={
+                            'url': url,
+                            'assigned_at': now.isoformat(),
+                            'depth': Decimal(str(depth)),
+                            'status': 'pending',
+                            'retries': Decimal(str(retries + 1))
+                        }
+                    )
                 else:
                     self.send_to_dead_letter_queue(url, reason="timeout and max retries exceeded")
                     self.task_table.update_item(
