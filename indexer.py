@@ -3,9 +3,7 @@ import json
 import logging
 import re
 import time
-from elasticsearch import Elasticsearch
 from datetime import datetime, timezone
-
 
 
 class Indexer:
@@ -21,9 +19,11 @@ class Indexer:
 
         self.statuses = ['index_success', 'index_failure', 'search_success', 'search_failure']
         
+        
         # Initialize Elasticsearch
         self.index_name = index_name
         self.es = self.initialize_elasticsearch(es)
+        
 
         # Initialize S3
         self.s3_bucket = s3_bucket
@@ -36,21 +36,17 @@ class Indexer:
         
         # Initialize clients
         self.region = region
-        self.sqs_content = boto3.client('sqs', region_name=region)
-        self.sqs_search = boto3.client('sqs', region_name=region)
-        self.sqs_response = boto3.client('sqs', region_name=region)
+        self.sqs = boto3.client('sqs', region_name=region)
         self.s3 = boto3.client('s3', region_name=region)
-
         self.delay = delay
 
-        # Configure logging
-        logging.basicConfig(filename='indexer.log', filemode='w', level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+        logging.basicConfig(filename='indexer.log', level=logging.INFO,format='%(asctime)s [%(levelname)s] %(message)s')
 
     def heartbeat(self):
         try:
             self.heartbeat_table.put_item(
                 Item={
-                    'indexer_id': self.indexer_id,
+                    'cralwer_id': self.indexer_id,
                     'status': 'running',
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
@@ -64,7 +60,7 @@ class Indexer:
             index_settings = {
                 "settings": {
                     "number_of_shards": 1,
-                    "number_of_replicas": 0,
+                    "number_of_replicas": 2,
                     "analysis": {
                         "filter": {
                             "english_stop": {"type": "stop", "stopwords": "_english_"},
@@ -118,6 +114,9 @@ class Indexer:
         try:
             response = self.s3.get_object(Bucket=self.s3_bucket, Key=s3_key)
             content = response['Body'].read().decode('utf-8')
+            if not content :
+                return 
+            content = json.loads(content)
             logging.info(f"Read from S3: {s3_key}")
             return content
 
@@ -212,7 +211,7 @@ class Indexer:
         }
                     
         try:
-            self.sqs_response.send_message(
+            self.sqs.send_message(
                         QueueUrl=self.response_queue_url,
                         MessageBody=json.dumps(message)
                     )
@@ -228,7 +227,7 @@ class Indexer:
 
     def index_process(self):
         try:
-            response_content = self.sqs_content.receive_message(
+            response_content = self.sqs.receive_message(
                 QueueUrl=self.content_queue_url,
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=2
@@ -243,7 +242,7 @@ class Indexer:
         if message_content:
             message = message_content[0]
             body = json.loads(message['Body'])
-            receipt_handle = message['ReceiptHandle']
+             
             
             s3_key = body.get('s3_key')
             url = body.get('url')
@@ -267,9 +266,9 @@ class Indexer:
             )
             
             try:
-                self.sqs_content.delete_message(
+                self.sqs.delete_message(
                     QueueUrl=self.content_queue_url, 
-                    ReceiptHandle=receipt_handle
+                    ReceiptHandle=message['ReceiptHandle']
                 )
                 logging.info(f"Deleted content message for URL: {url}")
             except Exception as e:
@@ -277,7 +276,7 @@ class Indexer:
 
     def search_process(self):
         try:
-            response_search = self.sqs_search.receive_message(
+            response_search = self.sqs.receive_message(
                 QueueUrl=self.search_queue_url,
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=2
@@ -293,7 +292,7 @@ class Indexer:
         if message_search:
             message = message_search[0]
             body = json.loads(message['Body'])
-            receipt_handle = message['ReceiptHandle']
+             
             
             query = body.get('query')
             client_id = body.get('client_id')
@@ -310,9 +309,9 @@ class Indexer:
 
                 
                 try:
-                    self.sqs_search.delete_message(
+                    self.sqs.delete_message(
                         QueueUrl=self.search_queue_url,
-                        ReceiptHandle=receipt_handle
+                        ReceiptHandle= message['ReceiptHandle']
                     )
                     logging.info(f"Deleted search message for query: {query}")
                 except Exception as e:
@@ -325,7 +324,6 @@ class Indexer:
             self.index_process()
             self.search_process()
             time.sleep(self.delay)
-
 
 
 
