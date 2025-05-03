@@ -69,8 +69,8 @@ class Client:
 
 
 
-client = Client("https://sqs.us-east-1.amazonaws.com/-------------/RequestQueue", 
-                "https://sqs.us-east-1.amazonaws.com/------------/ResponseQueue")
+client = Client("https://sqs.us-east-1.amazonaws.com/138749495090/RequestQueue", 
+                "https://sqs.us-east-1.amazonaws.com/138749495090/ResponseQueue")
 
 
 # Flask app setup
@@ -84,7 +84,7 @@ def index():
 def search():
     query = request.form['query']
     mode = request.form.get('search_mode', 'and')
-    client.send_search_query(query)
+    client.send_search_query(query, mode)
     results = client.receive_search_results()
     return render_template('index.html', query=query, results=results , selected_mode=mode)
 
