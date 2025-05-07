@@ -321,11 +321,49 @@ class MasterNode:
             crawler_id = item['crawler_id']
             last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
             time_diff = (now - last_heartbeat).total_seconds()
-
-            if time_diff > 120:
-                logging.warning(f"[Warning] {crawler_id} missed heartbeat! Last seen {int(time_diff)} seconds ago.")
+            if time_diff > 120 and item.get('status') != 'failed':
+                logging.warning(f"[Warning] {crawler_id} missed heartbeat! Declaring as failed.")
+                self.heartbeat_table.update_item(
+                    Key={'crawler_id': crawler_id},
+                    UpdateExpression="SET #s = :s",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":s": "failed"}
+                )
+                self.handle_failed_crawler(item)
             else:
                 logging.info(f"[Info] {crawler_id} is alive (last seen {int(time_diff)} seconds ago).")
+
+    def handle_failed_crawler(self, crawler_item):
+        failed_task_url = crawler_item.get('current_task_url')
+        if failed_task_url:
+            # Check if the task is still pending and not already failed/timed out
+            task = self.task_table.get_item(Key={'url': failed_task_url}).get('Item')
+            if task and task.get('status') == 'pending':
+                # Update the task's assigned_at timestamp to the current time
+                now = datetime.now(timezone.utc)
+                self.task_table.update_item(
+                    Key={'url': failed_task_url},
+                    UpdateExpression="SET assigned_at = :t",
+                    ExpressionAttributeValues={":t": now.isoformat()}
+                )
+                logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_item['crawler_id']}")
+        # Start a backup crawler
+        self.start_backup_crawler()
+
+    def start_backup_crawler(self):
+        ec2 = boto3.client('ec2', region_name=self.region_name)
+        # Use your AMI, instance type, security group, etc. Replace ImageId with your AMI ID
+        try:
+            ec2.run_instances(
+                ImageId='ami-xxxxxxx',  #!AMI ID ON AWS MN MARIAM isA
+                InstanceType='t2.micro',
+                MinCount=1,
+                MaxCount=1,
+                UserData='''#!/bin/bash\ncd /path/to/crawler\npython crawler.py\n'''
+            )
+            logging.info("[Recovery] Started backup crawler node.")
+        except Exception as e:
+            logging.error(f"[Recovery] Failed to start backup crawler: {e}")
 
     def count_crawled_urls(self):
         scanned = self.task_table.scan()
