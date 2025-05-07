@@ -2,6 +2,8 @@ from flask import Flask, render_template, request
 import boto3
 import json
 import time
+import uuid
+import logging
 from botocore.exceptions import ClientError
 
 
@@ -11,7 +13,8 @@ class Client:
         self.response_queue_url = response_queue_url
         self.region = region
         self.timeout = timeout
-        self.client_id = f"client_{int(time.time())}"
+        # Generate a truly unique client ID using UUID
+        self.client_id = f"client_{uuid.uuid4()}"
 
         try:
             self.sqs = boto3.client('sqs', region_name=self.region)
@@ -37,30 +40,40 @@ class Client:
         start = time.time()
         # Poll response queue for result
         while time.time() - start < self.timeout:
-            response = self.sqs.receive_message(
-                QueueUrl=self.response_queue_url,
-                MaxNumberOfMessages=1,  # Get one message at a time
-                WaitTimeSeconds=2
-            )
-            messages = response.get('Messages', [])
-            if messages:
-                message = messages[0]
-                body = json.loads(message['Body'])
-                # Check if this result belongs to this client
-                if body.get('client_id') == self.client_id:
-                    # Delete the message we found
-                    self.sqs.delete_message(
-                        QueueUrl=self.response_queue_url,
-                        ReceiptHandle=message['ReceiptHandle']
-                    )
-                    return body
-                else:
-                    # If not our message, put it back in the queue immediately
-                    self.sqs.change_message_visibility(
-                        QueueUrl=self.response_queue_url,
-                        ReceiptHandle=message['ReceiptHandle'],
-                        VisibilityTimeout=0
-                    )
+            try:
+                response = self.sqs.receive_message(
+                    QueueUrl=self.response_queue_url,
+                    MaxNumberOfMessages=1,  # Get one message at a time
+                    WaitTimeSeconds=2,
+                    VisibilityTimeout=30  #!Set visibility timeout not sure to prevent other clients from seeing the message
+                )
+                messages = response.get('Messages', [])
+                if messages:
+                    message = messages[0]
+                    body = json.loads(message['Body'])
+                    # Check if this result belongs to this client
+                    if (body.get('client_id') == self.client_id):
+                        try:
+                            # Try to delete the message
+                            self.sqs.delete_message(
+                                QueueUrl=self.response_queue_url,
+                                ReceiptHandle=message['ReceiptHandle']
+                            )
+                            return body
+                        except Exception as e:
+                            # If delete fails, message will return to queue after visibility timeout
+                            logging.error(f"Failed to delete message: {str(e)}")
+                            continue
+                    else:
+                        # If not our message, put it back in the queue immediately
+                        self.sqs.change_message_visibility(
+                            QueueUrl=self.response_queue_url,
+                            ReceiptHandle=message['ReceiptHandle'],
+                            VisibilityTimeout=0
+                        )
+            except Exception as e:
+                logging.error(f"Error receiving message: {str(e)}")
+                time.sleep(1)  # Add delay before retrying
         return []
 
     def submit_seed_urls(self, seed_urls, max_depth=2, domain=None):
@@ -71,7 +84,9 @@ class Client:
                 "url": url,
                 "depth": 0,
                 "max_depth": max_depth,
-                "domain": domain
+                "domain": domain,
+                "client_id": self.client_id,
+                
             }
             self.sqs.send_message(
                 QueueUrl=self.request_queue_url,
