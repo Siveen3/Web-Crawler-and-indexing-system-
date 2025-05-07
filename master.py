@@ -25,48 +25,95 @@ class MasterNode:
          self.ResponseQueue = ResponseQueue
          self.max_depth = max_depth
          self.request_queue_url = request_queue_url
-         self.sqs = boto3.client('sqs', region_name=self.region_name)
-         self.dynamodb = boto3.resource('dynamodb', region_name=self.region_name)
-         self.heartbeat_table = self.dynamodb.Table(self.heartbeat_table_name)
-         self.task_table = self.dynamodb.Table(self.task_table_name)
-         self.blocked_table = self.dynamodb.Table(blocked_table_name)
-         self.index_status_table = self.dynamodb.Table(self.index_status_table_name)
          self.search_queue_url = search_queue_url
-         
          self.TIMEOUT_SECONDS = 120
-         logging.basicConfig(filename='master_log.log', level=logging.INFO,
-                             format='%(asctime)s [%(levelname)s] %(message)s')
- 
+         self.running = False
+         self._init_aws_clients()
+         self._init_logging()
+
+    def _init_aws_clients(self):
+        """Initialize AWS service clients"""
+        try:
+            self.sqs = boto3.client('sqs', region_name=self.region_name)
+            self.dynamodb = boto3.resource('dynamodb', region_name=self.region_name)
+            self.heartbeat_table = self.dynamodb.Table(self.heartbeat_table_name)
+            self.task_table = self.dynamodb.Table(self.task_table_name)
+            self.blocked_table = self.dynamodb.Table(self.blocked_table_name)
+            self.index_status_table = self.dynamodb.Table(self.index_status_table_name)
+        except Exception as e:
+            logging.error(f"Failed to initialize AWS clients: {str(e)}")
+            raise
+
+    def _init_logging(self):
+        """Initialize logging configuration"""
+        try:
+            logging.basicConfig(
+                filename='master_log.log',
+                level=logging.INFO,
+                format='%(asctime)s [%(levelname)s] %(message)s',
+                datefmt='%Y-%m-%d %H:%M:%S'
+            )
+            # Also log to console
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+            console_handler.setFormatter(formatter)
+            logging.getLogger('').addHandler(console_handler)
+        except Exception as e:
+            print(f"Failed to initialize logging: {str(e)}")
+            raise
 
     def send_url_to_crawl_queue(self, url, domain, depth=0):
+        """
+        Send a URL to the crawl queue for processing.
+        
+        Args:
+            url (str): The URL to crawl
+            domain (str): The domain of the URL
+            depth (int): The current crawl depth (default: 0)
+            
+        Raises:
+            ValueError: If url or domain is invalid
+        """
+        if not url or not isinstance(url, str):
+            raise ValueError("URL must be a non-empty string")
+        if not domain or not isinstance(domain, str):
+            raise ValueError("Domain must be a non-empty string")
+        if not isinstance(depth, int) or depth < 0:
+            raise ValueError("Depth must be a non-negative integer")
+            
         if self.is_blocked_url(url):
             logging.warning(f"[Master] Skipping blocked URL: {url}")
             return
         
-        assigned_at = datetime.now(timezone.utc).isoformat()
-        message = {
-            "url": url,
-            "depth": depth,
-            "domain": domain,
-            "assigned_at": assigned_at  # Include assigned_at in the message
-        }
-        self.sqs.send_message(
-            QueueUrl=self.crawl_queue_url,
-            MessageBody=json.dumps(message, cls=DecimalEncoder)
-        )
-        logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
-    
-        self.task_table.put_item(
-            Item={
-                'url': url,
-                'assigned_at': assigned_at,  # Always include assigned_at
-                'depth':Decimal(str(depth)),
-                'domain': domain,
-                'status': 'pending',
-                'retries': Decimal(str(0))
+        try:
+            assigned_at = datetime.now(timezone.utc).isoformat()
+            message = {
+                "url": url,
+                "depth": depth,
+                "domain": domain,
+                "assigned_at": assigned_at
             }
-        )
-       
+            self.sqs.send_message(
+                QueueUrl=self.crawl_queue_url,
+                MessageBody=json.dumps(message, cls=DecimalEncoder)
+            )
+            logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
+        
+            self.task_table.put_item(
+                Item={
+                    'url': url,
+                    'assigned_at': assigned_at,
+                    'depth': Decimal(str(depth)),
+                    'domain': domain,
+                    'status': 'pending',
+                    'retries': Decimal(str(0))
+                }
+            )
+        except Exception as e:
+            logging.error(f"Failed to send URL to crawl queue: {str(e)}")
+            raise
+
     def wake_up_crawler(self, crawler_id):
         """Wake up a specific crawler by sending a wake-up signal"""
         wake_message = {
@@ -236,10 +283,34 @@ class MasterNode:
     
     def monitor_crawl_queue(self):
         """Main monitoring loop that runs all monitoring tasks periodically"""
-        while True:
-            self.run_all_monitoring_tasks()
-            time.sleep(30)
+        self.running = True
+        try:
+            while self.running:
+                self.run_all_monitoring_tasks()
+                time.sleep(30)
+        except KeyboardInterrupt:
+            logging.info("[Master] Received shutdown signal. Initiating graceful shutdown...")
+            self.shutdown()
+        except Exception as e:
+            logging.error(f"[Master] Unexpected error in monitor_crawl_queue: {str(e)}")
+            self.shutdown()
 
+    def shutdown(self):
+        """Gracefully shutdown the master node"""
+        logging.info("[Master] Starting graceful shutdown...")
+        self.running = False
+        try:
+            # Send shutdown signals to all crawlers
+            self.send_shutdown_signal_to_crawlers()
+            
+            # Final status report
+            self.count_crawled_urls()
+            self.compute_error_rate()
+            self.compute_index_search_error_rates()
+            
+            logging.info("[Master] Shutdown complete")
+        except Exception as e:
+            logging.error(f"[Master] Error during shutdown: {str(e)}")
 
     def monitor_crawlers_health(self):
         logging.info("[Monitor] Checking crawler heartbeats...")
@@ -277,95 +348,89 @@ class MasterNode:
     def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
         while True:
-            response = self.sqs.receive_message(
-                QueueUrl=self.report_queue_url,
-                MaxNumberOfMessages=10,
-                WaitTimeSeconds=5
-            )
-            messages = response.get('Messages', [])
-            if not messages:
-                break
-
-            for message in messages:
-                body = json.loads(message['Body'])
-                crawler_id = body.get('crawler_id', 'unknown')
-                crawled_url = body.get('url', '')
-                extracted_urls = body.get('extracted_urls', [])
-                depth = body.get('depth') or 0
-                status = body.get('status', 'unknown')
-                error = body.get('error', '')
-                domain = body.get('domain', None)
-                key = {'url': crawled_url} 
-                
-                    
-
-                if status == 'success':
-                    logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
-                    if depth < self.max_depth:
-                        for url in extracted_urls:
-                            self.send_url_to_crawl_queue(url,domain, depth=depth+1)
-                    self.task_table.update_item(
-                        Key=key,
-                        UpdateExpression="SET #s = :s",
-                        ExpressionAttributeNames={"#s": "status"},
-                        ExpressionAttributeValues={":s": "done"}
-                    )
-                    self.task_table.update_item(
-                        Key={'url': crawled_url},  # Only using url as key if that's the primary key
-                        UpdateExpression="SET #s = :s",
-                        ExpressionAttributeNames={"#s": "status"},
-                        ExpressionAttributeValues={":s": "done"}
-                    )
-                elif status == 'skipped':
-                    logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
-                    self.blocked_table.put_item(Item={
-                        'url': crawled_url,
-                        'reason': error,
-                        'timestamp': datetime.now(timezone.utc).isoformat()
-                    })
-                    self.task_table.update_item(
-                        Key=key,
-                        UpdateExpression="SET #s = :s",
-                        ExpressionAttributeNames={"#s": "status"},
-                        ExpressionAttributeValues={":s": "skipped"}
-                    )
-                    self.task_table.update_item(
-                        Key={'url': crawled_url},  # Only using url as key
-                        UpdateExpression="SET #s = :s",
-                        ExpressionAttributeNames={"#s": "status"},
-                        ExpressionAttributeValues={":s": "skipped"}
-                    )
-                elif status == 'shutdown':
-                    logging.info(f"[{crawler_id}] {error}")
-
-                else:
-                    logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
-                    print("Looking up DynamoDB item with key:", key)
-                    response = self.task_table.get_item(Key= {'url': crawled_url})
-                    retries = response.get('Item', {}).get('retries', 0)
-                    if retries < 3:
-                        self.send_url_to_crawl_queue(crawled_url, domain , depth=depth)
-                        self.task_table.update_item(
-                            Key=key,
-                            UpdateExpression="SET retries = :r, assigned_at = :t",
-                            ExpressionAttributeValues={
-                                ":r": Decimal(str(retries + 1)),
-                                ":t": datetime.now(timezone.utc).isoformat()
-                            }
-                        )
-                    else:
-                        self.send_to_dead_letter_queue(crawled_url, reason=error)
-                        self.task_table.update_item(
-                            Key=key,
-                            UpdateExpression="SET #s = :s",
-                            ExpressionAttributeNames={"#s": "status"},
-                            ExpressionAttributeValues={":s": "failed"}
-                        )
-
-                self.sqs.delete_message(
+            try:
+                response = self.sqs.receive_message(
                     QueueUrl=self.report_queue_url,
-                    ReceiptHandle=message['ReceiptHandle']
+                    MaxNumberOfMessages=10,
+                    WaitTimeSeconds=5
                 )
+                messages = response.get('Messages', [])
+                if not messages:
+                    break
+
+                for message in messages:
+                    try:
+                        body = json.loads(message['Body'])
+                        crawler_id = body.get('crawler_id', 'unknown')
+                        crawled_url = body.get('url', '')
+                        extracted_urls = body.get('extracted_urls', [])
+                        depth = body.get('depth') or 0
+                        status = body.get('status', 'unknown')
+                        error = body.get('error', '')
+                        domain = body.get('domain', None)
+                        
+                        if status == 'success':
+                            logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
+                            if depth < self.max_depth:
+                                for url in extracted_urls:
+                                    self.send_url_to_crawl_queue(url, domain, depth=depth+1)
+                            self.task_table.update_item(
+                                Key={'url': crawled_url},
+                                UpdateExpression="SET #s = :s",
+                                ExpressionAttributeNames={"#s": "status"},
+                                ExpressionAttributeValues={":s": "done"}
+                            )
+                        elif status == 'skipped':
+                            logging.info(f"[{crawler_id}] Skipped URL (blocked by robots.txt): {crawled_url}")
+                            self.blocked_table.put_item(Item={
+                                'url': crawled_url,
+                                'reason': error,
+                                'timestamp': datetime.now(timezone.utc).isoformat()
+                            })
+                            self.task_table.update_item(
+                                Key={'url': crawled_url},
+                                UpdateExpression="SET #s = :s",
+                                ExpressionAttributeNames={"#s": "status"},
+                                ExpressionAttributeValues={":s": "skipped"}
+                            )
+                        elif status == 'shutdown':
+                            logging.info(f"[{crawler_id}] {error}")
+                        else:
+                            logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
+                            try:
+                                response = self.task_table.get_item(Key={'url': crawled_url})
+                                retries = response.get('Item', {}).get('retries', 0)
+                                if retries < 3:
+                                    self.send_url_to_crawl_queue(crawled_url, domain, depth=depth)
+                                    self.task_table.update_item(
+                                        Key={'url': crawled_url},
+                                        UpdateExpression="SET retries = :r, assigned_at = :t",
+                                        ExpressionAttributeValues={
+                                            ":r": Decimal(str(retries + 1)),
+                                            ":t": datetime.now(timezone.utc).isoformat()
+                                        }
+                                    )
+                                else:
+                                    self.send_to_dead_letter_queue(crawled_url, reason=error)
+                                    self.task_table.update_item(
+                                        Key={'url': crawled_url},
+                                        UpdateExpression="SET #s = :s",
+                                        ExpressionAttributeNames={"#s": "status"},
+                                        ExpressionAttributeValues={":s": "failed"}
+                                    )
+                            except Exception as e:
+                                logging.error(f"Error processing failed crawl task: {str(e)}")
+
+                        self.sqs.delete_message(
+                            QueueUrl=self.report_queue_url,
+                            ReceiptHandle=message['ReceiptHandle']
+                        )
+                    except Exception as e:
+                        logging.error(f"Error processing message: {str(e)}")
+                        continue
+            except Exception as e:
+                logging.error(f"Error in monitor_crawler_reports: {str(e)}")
+                time.sleep(5)  # Add delay before retrying
 
     def send_to_dead_letter_queue(self, url, reason="max retries exceeded"):
         message = {
