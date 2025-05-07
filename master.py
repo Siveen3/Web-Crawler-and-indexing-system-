@@ -354,16 +354,26 @@ class MasterNode:
         ec2 = boto3.client('ec2', region_name=self.region_name)
         # Use your AMI, instance type, security group, etc. Replace ImageId with your AMI ID
         try:
-            ec2.run_instances(
+            response = ec2.run_instances(
                 ImageId='ami-xxxxxxx',  #!AMI ID ON AWS MN MARIAM isA
                 InstanceType='t2.micro',
                 MinCount=1,
                 MaxCount=1,
-                UserData='''#!/bin/bash\ncd /path/to/crawler\npython crawler.py\n'''
+                UserData='''#!/bin/bash
+                cd /path/to/crawler
+                python crawler.py
+                '''
             )
-            logging.info("[Recovery] Started backup crawler node.")
+            instance_id = response['Instances'][0]['InstanceId']
+            logging.info(f"[Recovery] Starting backup crawler node with instance ID: {instance_id}")
+            # Wait for the instance to be running
+            waiter = ec2.get_waiter('instance_running')
+            waiter.wait(InstanceIds=[instance_id])
+            logging.info(f"[Recovery] Backup crawler node {instance_id} is now running.")
         except Exception as e:
             logging.error(f"[Recovery] Failed to start backup crawler: {e}")
+
+
 
     def count_crawled_urls(self):
         scanned = self.task_table.scan()
