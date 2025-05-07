@@ -187,7 +187,6 @@ class MasterNode:
                     QueueUrl=self.request_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
-
     def send_shutdown_signal_to_crawlers(self):
         logging.info("[Master] Sending shutdown signals to crawlers...")
         response = self.heartbeat_table.scan()
@@ -203,7 +202,7 @@ class MasterNode:
             )
             logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
     def monitor_indexer_feedback(self):
-        logging.info("[Monitor] Checking indexer feedback queue...")
+        logging.info("[Monitor] Checking indexer feedback queue...")  #! Add logging for indexer feedback
         while True:
             response = self.sqs.receive_message(
                 QueueUrl=self.index_feedback_queue_url,
@@ -246,6 +245,7 @@ class MasterNode:
                     QueueUrl=self.index_feedback_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
+    
     def forward_search_result_to_client(self, result_json_str):
         try:
             result_json = json.loads(result_json_str)
@@ -347,8 +347,18 @@ class MasterNode:
                     ExpressionAttributeValues={":t": now.isoformat()}
                 )
                 logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_item['crawler_id']}")
-        # Start a backup crawler
-        self.start_backup_crawler()
+
+        # Check for shutdown crawlers
+        response = self.heartbeat_table.scan()
+        shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
+
+        if not shutdown_crawlers:
+            logging.info("[Recovery] No shutdown crawlers found. Starting a new EC2 instance.")
+            self.start_backup_crawler()
+        else:
+            crawler_id = shutdown_crawlers[0]
+            logging.info(f"[Recovery] Waking up shutdown crawler: {crawler_id}")
+            self.wake_up_crawler(crawler_id)
 
     def start_backup_crawler(self):
         ec2 = boto3.client('ec2', region_name=self.region_name)
@@ -372,8 +382,6 @@ class MasterNode:
             logging.info(f"[Recovery] Backup crawler node {instance_id} is now running.")
         except Exception as e:
             logging.error(f"[Recovery] Failed to start backup crawler: {e}")
-
-
 
     def count_crawled_urls(self):
         scanned = self.task_table.scan()
@@ -576,6 +584,11 @@ class MasterNode:
             # If there are messages but no active crawlers, wake up crawlers
             self.wake_up_all_crawlers()
 
+#!Option 2: Use an AMI (Amazon Machine Image)
+#!Set up one EC2 instance with everything installed and configured.
+#!Create an AMI (a snapshot) from it.
+#!Launch multiple EC2s from that AMI — they're all preloaded with your app and ready to go.
+#!Faster boot time, no need to re-download code or install dependencies.
     
 if __name__ == "__main__":
     master = MasterNode(
