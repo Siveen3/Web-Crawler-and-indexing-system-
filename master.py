@@ -28,6 +28,10 @@ class MasterNode:
          self.search_queue_url = search_queue_url
          self.TIMEOUT_SECONDS = 120
          self.running = False
+         self.last_crawl_count = 0
+         self.last_crawl_time = time.time()
+         self.last_indexed_count = 0
+         self.last_indexed_time = time.time()
          self._init_aws_clients()
          self._init_logging()
 
@@ -623,12 +627,36 @@ class MasterNode:
         shutdown = sum(1 for item in response['Items'] if item.get('status') == 'shutdown')
         print(f"Crawler Nodes - Active: {active}, Failed: {failed}, Shutdown: {shutdown}")
 
+    def print_crawl_rate(self):
+        scanned = self.task_table.scan()
+        crawled = sum(1 for item in scanned['Items'] if item['status'] == 'done')
+        now = time.time()
+        elapsed = now - self.last_crawl_time
+        if elapsed > 0:
+            rate = (crawled - self.last_crawl_count) / elapsed
+            print(f"Crawl rate: {rate:.2f} URLs/sec")
+        self.last_crawl_count = crawled
+        self.last_crawl_time = now
+
+    def print_indexing_rate(self):
+        response = self.index_status_table.scan()
+        indexed = sum(1 for item in response['Items'] if item['status'] == 'index_success')
+        now = time.time()
+        elapsed = now - self.last_indexed_time
+        if elapsed > 0:
+            rate = (indexed - self.last_indexed_count) / elapsed
+            print(f"Indexing rate: {rate:.2f} URLs/sec")
+        self.last_indexed_count = indexed
+        self.last_indexed_time = now
+
     def print_dashboard(self):
         print("==== Monitoring Dashboard ====")
         self.count_crawled_urls()
         self.compute_index_search_error_rates()
         self.print_crawl_quality_metrics()
         self.print_crawler_node_status()
+        self.print_crawl_rate()
+        self.print_indexing_rate()
         print("=============================")
 
 #!Option 2: Use an AMI (Amazon Machine Image)
