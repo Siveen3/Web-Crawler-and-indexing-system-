@@ -13,7 +13,7 @@ class DecimalEncoder(json.JSONEncoder):
 
 class MasterNode:
     def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name, task_table_name, dead_letter_queue_url, blocked_table_name, index_feedback_queue_url,
-                   index_status_table_name, ResponseQueue, request_queue_url,search_queue_url, max_depth=2):
+                   index_status_table_name, ResponseQueue, request_queue_url, search_queue_url, indexer_heartbeat_table_name, max_depth=2):
          self.region_name = region_name
          self.crawl_queue_url = crawl_queue_url
          self.report_queue_url = report_queue_url
@@ -26,6 +26,7 @@ class MasterNode:
          self.max_depth = max_depth
          self.request_queue_url = request_queue_url
          self.search_queue_url = search_queue_url
+         self.indexer_heartbeat_table_name = indexer_heartbeat_table_name
          self.TIMEOUT_SECONDS = 120
          self.running = False
          self.last_crawl_count = 0
@@ -41,6 +42,7 @@ class MasterNode:
             self.sqs = boto3.client('sqs', region_name=self.region_name)
             self.dynamodb = boto3.resource('dynamodb', region_name=self.region_name)
             self.heartbeat_table = self.dynamodb.Table(self.heartbeat_table_name)
+            self.indexer_heartbeat_table = self.dynamodb.Table(self.indexer_heartbeat_table_name)
             self.task_table = self.dynamodb.Table(self.task_table_name)
             self.blocked_table = self.dynamodb.Table(self.blocked_table_name)
             self.index_status_table = self.dynamodb.Table(self.index_status_table_name)
@@ -309,7 +311,7 @@ class MasterNode:
             crawler_id = item['crawler_id']
             last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
             time_diff = (now - last_heartbeat).total_seconds()
-            if time_diff > 120 and item.get('status') != 'failed':
+            if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
                 logging.warning(f"[Warning] {crawler_id} missed heartbeat! Declaring as failed.")
                 self.heartbeat_table.update_item(
                     Key={'crawler_id': crawler_id},
@@ -535,11 +537,12 @@ class MasterNode:
         self.monitor_crawlers_health()
         self.monitor_crawler_reports()
         
+        # Monitor indexer health and feedback
+        self.monitor_indexers_health()
+        self.monitor_indexer_feedback()
+        
         # Monitor task timeouts
         self.monitor_task_timeouts()
-        
-        # Monitor indexer feedback
-        self.monitor_indexer_feedback()
         
         # Monitor crawl queue status
         response = self.sqs.get_queue_attributes(
@@ -679,6 +682,7 @@ if __name__ == "__main__":
         ResponseQueue= 'https://sqs.us-east-1.amazonaws.com/138749495090/ResponseQueue',
         search_queue_url = 'https://sqs.us-east-1.amazonaws.com/138749495090/SearchQueue',
         index_status_table_name = 'IndexerTaskAssignments',
+        indexer_heartbeat_table_name = 'IndexerHeartbeatTable',
         max_depth=2)
 
     logging.info("[Master] Starting comprehensive monitoring...")
