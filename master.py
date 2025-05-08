@@ -13,7 +13,7 @@ class DecimalEncoder(json.JSONEncoder):
 
 class MasterNode:
     def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name, task_table_name, dead_letter_queue_url, blocked_table_name, index_feedback_queue_url,
-                   index_status_table_name, ResponseQueue, request_queue_url,search_queue_url, max_depth=2):
+                   index_status_table_name, ResponseQueue, request_queue_url, search_queue_url, indexer_heartbeat_table_name, max_depth=2):
          self.region_name = region_name
          self.crawl_queue_url = crawl_queue_url
          self.report_queue_url = report_queue_url
@@ -26,8 +26,13 @@ class MasterNode:
          self.max_depth = max_depth
          self.request_queue_url = request_queue_url
          self.search_queue_url = search_queue_url
+         self.indexer_heartbeat_table_name = indexer_heartbeat_table_name
          self.TIMEOUT_SECONDS = 120
          self.running = False
+         self.last_crawl_count = 0
+         self.last_crawl_time = time.time()
+         self.last_indexed_count = 0
+         self.last_indexed_time = time.time()
          self._init_aws_clients()
          self._init_logging()
 
@@ -37,6 +42,7 @@ class MasterNode:
             self.sqs = boto3.client('sqs', region_name=self.region_name)
             self.dynamodb = boto3.resource('dynamodb', region_name=self.region_name)
             self.heartbeat_table = self.dynamodb.Table(self.heartbeat_table_name)
+            self.indexer_heartbeat_table = self.dynamodb.Table(self.indexer_heartbeat_table_name)
             self.task_table = self.dynamodb.Table(self.task_table_name)
             self.blocked_table = self.dynamodb.Table(self.blocked_table_name)
             self.index_status_table = self.dynamodb.Table(self.index_status_table_name)
@@ -187,7 +193,6 @@ class MasterNode:
                     QueueUrl=self.request_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
-
     def send_shutdown_signal_to_crawlers(self):
         logging.info("[Master] Sending shutdown signals to crawlers...")
         response = self.heartbeat_table.scan()
@@ -203,7 +208,7 @@ class MasterNode:
             )
             logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
     def monitor_indexer_feedback(self):
-        logging.info("[Monitor] Checking indexer feedback queue...")
+        logging.info("[Monitor] Checking indexer feedback queue...")  #! Add logging for indexer feedback
         while True:
             response = self.sqs.receive_message(
                 QueueUrl=self.index_feedback_queue_url,
@@ -246,6 +251,7 @@ class MasterNode:
                     QueueUrl=self.index_feedback_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
+    
     def forward_search_result_to_client(self, result_json_str):
         try:
             result_json = json.loads(result_json_str)
@@ -295,22 +301,6 @@ class MasterNode:
             logging.error(f"[Master] Unexpected error in monitor_crawl_queue: {str(e)}")
             self.shutdown()
 
-    def shutdown(self):
-        """Gracefully shutdown the master node"""
-        logging.info("[Master] Starting graceful shutdown...")
-        self.running = False
-        try:
-            # Send shutdown signals to all crawlers
-            self.send_shutdown_signal_to_crawlers()
-            
-            # Final status report
-            self.count_crawled_urls()
-            self.compute_error_rate()
-            self.compute_index_search_error_rates()
-            
-            logging.info("[Master] Shutdown complete")
-        except Exception as e:
-            logging.error(f"[Master] Error during shutdown: {str(e)}")
 
     def monitor_crawlers_health(self):
         logging.info("[Monitor] Checking crawler heartbeats...")
@@ -321,7 +311,7 @@ class MasterNode:
             crawler_id = item['crawler_id']
             last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
             time_diff = (now - last_heartbeat).total_seconds()
-            if time_diff > 120 and item.get('status') != 'failed':
+            if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
                 logging.warning(f"[Warning] {crawler_id} missed heartbeat! Declaring as failed.")
                 self.heartbeat_table.update_item(
                     Key={'crawler_id': crawler_id},
@@ -347,8 +337,18 @@ class MasterNode:
                     ExpressionAttributeValues={":t": now.isoformat()}
                 )
                 logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_item['crawler_id']}")
-        # Start a backup crawler
-        self.start_backup_crawler()
+
+        # Check for shutdown crawlers
+        response = self.heartbeat_table.scan()
+        shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
+
+        if not shutdown_crawlers:
+            logging.info("[Recovery] No shutdown crawlers found. Starting a new EC2 instance.")
+            self.start_backup_crawler()
+        else:
+            crawler_id = shutdown_crawlers[0]
+            logging.info(f"[Recovery] Waking up shutdown crawler: {crawler_id}")
+            self.wake_up_crawler(crawler_id)
 
     def start_backup_crawler(self):
         ec2 = boto3.client('ec2', region_name=self.region_name)
@@ -373,25 +373,11 @@ class MasterNode:
         except Exception as e:
             logging.error(f"[Recovery] Failed to start backup crawler: {e}")
 
-
-
     def count_crawled_urls(self):
         scanned = self.task_table.scan()
         done = sum(1 for item in scanned['Items'] if item['status'] == 'done')
         logging.info(f"Total URLs crawled successfully: {done}")
         print(f"Total URLs crawled successfully: {done}")
-
-    def compute_error_rate(self):
-        scanned = self.task_table.scan()
-        total = len(scanned['Items'])
-        failed = sum(1 for item in scanned['Items'] if item['status'] == 'failed')
-        skipped = sum(1 for item in scanned['Items'] if item['status'] == 'skipped')
-        logging.info(f" Failed: {failed}, Total: {total}")
-        if total > 0:
-            error_rate = (failed / total) * 100
-            print(f"Error rate: {error_rate:.2f}%")
-        else:
-            print("Error rate: 0.00%")
 
     def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
@@ -551,11 +537,12 @@ class MasterNode:
         self.monitor_crawlers_health()
         self.monitor_crawler_reports()
         
+        # Monitor indexer health and feedback
+        self.monitor_indexers_health()
+        self.monitor_indexer_feedback()
+        
         # Monitor task timeouts
         self.monitor_task_timeouts()
-        
-        # Monitor indexer feedback
-        self.monitor_indexer_feedback()
         
         # Monitor crawl queue status
         response = self.sqs.get_queue_attributes(
@@ -570,12 +557,117 @@ class MasterNode:
             logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
             self.send_shutdown_signal_to_crawlers()
             self.count_crawled_urls()
-            self.compute_error_rate()
+            self.print_crawl_quality_metrics()
             self.compute_index_search_error_rates()
         else:
-            # If there are messages but no active crawlers, wake up crawlers
-            self.wake_up_all_crawlers()
+            # Dynamic scaling logic
+            active_crawlers = self.count_active_crawlers()
+            min_crawlers = 2
+            desired_crawlers = max(min_crawlers, min(num_messages // 10 + 1, 10))
 
+            if active_crawlers < desired_crawlers:
+                num_to_start = desired_crawlers - active_crawlers
+                self.ensure_crawlers(num_to_start)
+            elif active_crawlers > desired_crawlers:
+                response = self.heartbeat_table.scan()
+                running_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'running']
+                # Shut down excess crawlers, but keep at least min_crawlers
+                for crawler_id in running_crawlers[desired_crawlers:]:
+                    self.send_shutdown_signal_to_crawler(crawler_id)
+                logging.info(f"[Scaling] Sent shutdown to {active_crawlers - desired_crawlers} crawlers (active: {active_crawlers} -> {desired_crawlers})")
+            else:
+                logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
+
+        # Print dashboard at the end of the monitoring cycle
+        self.print_dashboard()
+
+    def count_active_crawlers(self):
+        """Return the number of crawlers with status 'running'."""
+        response = self.heartbeat_table.scan()
+        return sum(1 for item in response['Items'] if item.get('status') == 'running')
+
+    def send_shutdown_signal_to_crawler(self, crawler_id):
+        shutdown_message = {
+            "shutdown": True,
+            "crawler_id": crawler_id
+        }
+        self.sqs.send_message(
+            QueueUrl=self.crawl_queue_url,
+            MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
+        )
+        logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
+
+    def ensure_crawlers(self, num_to_start):
+        """Wake up shutdown crawlers if available, otherwise start new ones."""
+        response = self.heartbeat_table.scan()
+        shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
+        num_woken = 0
+        for crawler_id in shutdown_crawlers[:num_to_start]:
+            self.wake_up_crawler(crawler_id)
+            num_woken += 1
+        num_to_start_new = num_to_start - num_woken
+        for _ in range(num_to_start_new):
+            self.start_backup_crawler()
+        logging.info(f"[Scaling] Woke up {num_woken} shutdown crawlers, started {num_to_start_new} new crawlers.")
+
+    def print_crawl_quality_metrics(self):
+        scanned = self.task_table.scan()
+        total = len(scanned['Items'])
+        crawled = sum(1 for item in scanned['Items'] if item['status'] == 'done')
+        failed = sum(1 for item in scanned['Items'] if item['status'] == 'failed')
+        skipped = sum(1 for item in scanned['Items'] if item['status'] == 'skipped')
+        coverage = (crawled / total) * 100 if total > 0 else 0
+        error_rate = (failed / total) * 100 if total > 0 else 0
+
+        print(f"Crawl Coverage: {coverage:.2f}% ({crawled}/{total})")
+        print(f"Error rate: {error_rate:.2f}% (Failed: {failed}, Total: {total})")
+        print(f"Politeness: URLs skipped due to robots.txt: {skipped}")
+
+    def print_crawler_node_status(self):
+        response = self.heartbeat_table.scan()
+        active = sum(1 for item in response['Items'] if item.get('status') == 'running')
+        failed = sum(1 for item in response['Items'] if item.get('status') == 'failed')
+        shutdown = sum(1 for item in response['Items'] if item.get('status') == 'shutdown')
+        print(f"Crawler Nodes - Active: {active}, Failed: {failed}, Shutdown: {shutdown}")
+
+    def print_crawl_rate(self):
+        scanned = self.task_table.scan()
+        crawled = sum(1 for item in scanned['Items'] if item['status'] == 'done')
+        now = time.time()
+        elapsed = now - self.last_crawl_time
+        if elapsed > 0:
+            rate = (crawled - self.last_crawl_count) / elapsed
+            print(f"Crawl rate: {rate:.2f} URLs/sec")
+        self.last_crawl_count = crawled
+        self.last_crawl_time = now
+
+    def print_indexing_rate(self):
+        response = self.index_status_table.scan()
+        indexed = sum(1 for item in response['Items'] if item['status'] == 'index_success')
+        now = time.time()
+        elapsed = now - self.last_indexed_time
+        if elapsed > 0:
+            rate = (indexed - self.last_indexed_count) / elapsed
+            print(f"Indexing rate: {rate:.2f} URLs/sec")
+        self.last_indexed_count = indexed
+        self.last_indexed_time = now
+
+    def print_dashboard(self):
+        print("==== Monitoring Dashboard ====")
+        self.count_crawled_urls()
+        self.compute_index_search_error_rates()
+        self.print_crawl_quality_metrics()
+        self.print_crawler_node_status()
+        self.print_crawl_rate()
+        self.print_indexing_rate()
+        print("=============================")
+        
+
+#!Option 2: Use an AMI (Amazon Machine Image)
+#!Set up one EC2 instance with everything installed and configured.
+#!Create an AMI (a snapshot) from it.
+#!Launch multiple EC2s from that AMI — they're all preloaded with your app and ready to go.
+#!Faster boot time, no need to re-download code or install dependencies.
     
 if __name__ == "__main__":
     master = MasterNode(
@@ -591,6 +683,7 @@ if __name__ == "__main__":
         ResponseQueue= 'https://sqs.us-east-1.amazonaws.com/138749495090/ResponseQueue',
         search_queue_url = 'https://sqs.us-east-1.amazonaws.com/138749495090/SearchQueue',
         index_status_table_name = 'IndexerTaskAssignments',
+        indexer_heartbeat_table_name = 'IndexerHeartbeatTable',
         max_depth=2)
 
     logging.info("[Master] Starting comprehensive monitoring...")
