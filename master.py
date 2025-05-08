@@ -295,23 +295,7 @@ class MasterNode:
             logging.error(f"[Master] Unexpected error in monitor_crawl_queue: {str(e)}")
             self.shutdown()
 
-    def shutdown(self):
-        """Gracefully shutdown the master node"""
-        logging.info("[Master] Starting graceful shutdown...")
-        self.running = False
-        try:
-            # Send shutdown signals to all crawlers
-            self.send_shutdown_signal_to_crawlers()
-            
-            # Final status report
-            self.count_crawled_urls()
-            self.compute_error_rate()
-            self.compute_index_search_error_rates()
-            
-            logging.info("[Master] Shutdown complete")
-        except Exception as e:
-            logging.error(f"[Master] Error during shutdown: {str(e)}")
-    #! malhash lazma 
+
     def monitor_crawlers_health(self):
         logging.info("[Monitor] Checking crawler heartbeats...")
         response = self.heartbeat_table.scan()
@@ -388,18 +372,6 @@ class MasterNode:
         done = sum(1 for item in scanned['Items'] if item['status'] == 'done')
         logging.info(f"Total URLs crawled successfully: {done}")
         print(f"Total URLs crawled successfully: {done}")
-
-    def compute_error_rate(self):
-        scanned = self.task_table.scan()
-        total = len(scanned['Items'])
-        failed = sum(1 for item in scanned['Items'] if item['status'] == 'failed')
-        skipped = sum(1 for item in scanned['Items'] if item['status'] == 'skipped')
-        logging.info(f" Failed: {failed}, Total: {total}")
-        if total > 0:
-            error_rate = (failed / total) * 100
-            print(f"Error rate: {error_rate:.2f}%")
-        else:
-            print("Error rate: 0.00%")
 
     def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
@@ -578,13 +550,12 @@ class MasterNode:
             logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
             self.send_shutdown_signal_to_crawlers()
             self.count_crawled_urls()
-            self.compute_error_rate()
+            self.print_crawl_quality_metrics()
             self.compute_index_search_error_rates()
         else:
             # Dynamic scaling logic
             active_crawlers = self.count_active_crawlers()
             min_crawlers = 2
-            # Example: 1 crawler per 10 URLs, up to 10 crawlers
             desired_crawlers = max(min_crawlers, min(num_messages // 10 + 1, 10))
 
             if active_crawlers < desired_crawlers:
@@ -599,6 +570,9 @@ class MasterNode:
                 logging.info(f"[Scaling] Sent shutdown to {active_crawlers - desired_crawlers} crawlers (active: {active_crawlers} -> {desired_crawlers})")
             else:
                 logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
+
+        # Print dashboard at the end of the monitoring cycle
+        self.print_dashboard()
 
     def count_active_crawlers(self):
         """Return the number of crawlers with status 'running'."""
@@ -628,6 +602,34 @@ class MasterNode:
         for _ in range(num_to_start_new):
             self.start_backup_crawler()
         logging.info(f"[Scaling] Woke up {num_woken} shutdown crawlers, started {num_to_start_new} new crawlers.")
+
+    def print_crawl_quality_metrics(self):
+        scanned = self.task_table.scan()
+        total = len(scanned['Items'])
+        crawled = sum(1 for item in scanned['Items'] if item['status'] == 'done')
+        failed = sum(1 for item in scanned['Items'] if item['status'] == 'failed')
+        skipped = sum(1 for item in scanned['Items'] if item['status'] == 'skipped')
+        coverage = (crawled / total) * 100 if total > 0 else 0
+        error_rate = (failed / total) * 100 if total > 0 else 0
+
+        print(f"Crawl Coverage: {coverage:.2f}% ({crawled}/{total})")
+        print(f"Error rate: {error_rate:.2f}% (Failed: {failed}, Total: {total})")
+        print(f"Politeness: URLs skipped due to robots.txt: {skipped}")
+
+    def print_crawler_node_status(self):
+        response = self.heartbeat_table.scan()
+        active = sum(1 for item in response['Items'] if item.get('status') == 'running')
+        failed = sum(1 for item in response['Items'] if item.get('status') == 'failed')
+        shutdown = sum(1 for item in response['Items'] if item.get('status') == 'shutdown')
+        print(f"Crawler Nodes - Active: {active}, Failed: {failed}, Shutdown: {shutdown}")
+
+    def print_dashboard(self):
+        print("==== Monitoring Dashboard ====")
+        self.count_crawled_urls()
+        self.compute_index_search_error_rates()
+        self.print_crawl_quality_metrics()
+        self.print_crawler_node_status()
+        print("=============================")
 
 #!Option 2: Use an AMI (Amazon Machine Image)
 #!Set up one EC2 instance with everything installed and configured.
