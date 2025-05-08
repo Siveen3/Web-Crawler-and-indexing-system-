@@ -675,7 +675,11 @@ class MasterNode:
         print("=============================")
         
 
-
+#!Option 2: Use an AMI (Amazon Machine Image)
+#!Set up one EC2 instance with everything installed and configured.
+#!Create an AMI (a snapshot) from it.
+#!Launch multiple EC2s from that AMI — they're all preloaded with your app and ready to go.
+#!Faster boot time, no need to re-download code or install dependencies.
     
 if __name__ == "__main__":
     master = MasterNode(
@@ -696,4 +700,4 @@ if __name__ == "__main__":
 
     logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
-    #####
+    ####
