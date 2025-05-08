@@ -311,7 +311,7 @@ class MasterNode:
             logging.info("[Master] Shutdown complete")
         except Exception as e:
             logging.error(f"[Master] Error during shutdown: {str(e)}")
-
+    #! malhash lazma 
     def monitor_crawlers_health(self):
         logging.info("[Monitor] Checking crawler heartbeats...")
         response = self.heartbeat_table.scan()
@@ -581,8 +581,53 @@ class MasterNode:
             self.compute_error_rate()
             self.compute_index_search_error_rates()
         else:
-            # If there are messages but no active crawlers, wake up crawlers
-            self.wake_up_all_crawlers()
+            # Dynamic scaling logic
+            active_crawlers = self.count_active_crawlers()
+            min_crawlers = 2
+            # Example: 1 crawler per 10 URLs, up to 10 crawlers
+            desired_crawlers = max(min_crawlers, min(num_messages // 10 + 1, 10))
+
+            if active_crawlers < desired_crawlers:
+                num_to_start = desired_crawlers - active_crawlers
+                self.ensure_crawlers(num_to_start)
+            elif active_crawlers > desired_crawlers:
+                response = self.heartbeat_table.scan()
+                running_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'running']
+                # Shut down excess crawlers, but keep at least min_crawlers
+                for crawler_id in running_crawlers[desired_crawlers:]:
+                    self.send_shutdown_signal_to_crawler(crawler_id)
+                logging.info(f"[Scaling] Sent shutdown to {active_crawlers - desired_crawlers} crawlers (active: {active_crawlers} -> {desired_crawlers})")
+            else:
+                logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
+
+    def count_active_crawlers(self):
+        """Return the number of crawlers with status 'running'."""
+        response = self.heartbeat_table.scan()
+        return sum(1 for item in response['Items'] if item.get('status') == 'running')
+
+    def send_shutdown_signal_to_crawler(self, crawler_id):
+        shutdown_message = {
+            "shutdown": True,
+            "crawler_id": crawler_id
+        }
+        self.sqs.send_message(
+            QueueUrl=self.crawl_queue_url,
+            MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
+        )
+        logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
+
+    def ensure_crawlers(self, num_to_start):
+        """Wake up shutdown crawlers if available, otherwise start new ones."""
+        response = self.heartbeat_table.scan()
+        shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
+        num_woken = 0
+        for crawler_id in shutdown_crawlers[:num_to_start]:
+            self.wake_up_crawler(crawler_id)
+            num_woken += 1
+        num_to_start_new = num_to_start - num_woken
+        for _ in range(num_to_start_new):
+            self.start_backup_crawler()
+        logging.info(f"[Scaling] Woke up {num_woken} shutdown crawlers, started {num_to_start_new} new crawlers.")
 
 #!Option 2: Use an AMI (Amazon Machine Image)
 #!Set up one EC2 instance with everything installed and configured.
