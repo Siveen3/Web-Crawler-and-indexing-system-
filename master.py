@@ -12,13 +12,14 @@ class DecimalEncoder(json.JSONEncoder):
         return super(DecimalEncoder, self).default(o)
 
 class MasterNode:
-    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name, task_table_name, dead_letter_queue_url, blocked_table_name, index_feedback_queue_url,
+    def __init__(self, region_name, crawl_queue_url, report_queue_url, heartbeat_table_name, task_table_name, crawled_table_name, dead_letter_queue_url, blocked_table_name, index_feedback_queue_url,
                    index_status_table_name, ResponseQueue, request_queue_url, search_queue_url, indexer_heartbeat_table_name, max_depth=2):
          self.region_name = region_name
          self.crawl_queue_url = crawl_queue_url
          self.report_queue_url = report_queue_url
          self.heartbeat_table_name = heartbeat_table_name
          self.task_table_name = task_table_name
+         self.crawled_table_name = crawled_table_name
          self.dead_letter_queue_url = dead_letter_queue_url
          self.index_feedback_queue_url = index_feedback_queue_url
          self.index_status_table_name = index_status_table_name
@@ -93,6 +94,9 @@ class MasterNode:
             return
         
         try:
+            if self.is_recently_crawled(url):
+                logging.info(f"[Master] Skipping recently crawled URL: {url}")
+                return
             assigned_at = datetime.now(timezone.utc).isoformat()
             message = {
                 "url": url,
@@ -525,6 +529,29 @@ class MasterNode:
     def is_blocked_url(self, url):
         response = self.blocked_table.get_item(Key={'url': url})
         return 'Item' in response
+
+
+    def is_recently_crawled(self, url, domain, depth, threshold_hours=24):
+        try:
+            response = self.crawled_table.get_item(Key={'url': url})
+
+            item = response.get('Item')
+            if not item:
+                return False
+            
+            same_domain = item.get('domain') == domain
+            same_depth = int(item.get('depth', 2)) == int(depth)
+
+            if not (same_domain and same_depth):
+                return False
+
+            last_crawled = datetime.fromisoformat(item['timestamp'])
+            return (datetime.now(timezone.utc) - last_crawled).total_seconds() < threshold_hours * 3600
+
+        except Exception as e:
+            logging.error(f"[Master] Error checking crawled table: {e}")
+            return False  # Allow crawling if error
+        
 
     def run_all_monitoring_tasks(self):
         """Run all monitoring tasks in sequence"""

@@ -18,6 +18,7 @@ class Crawler:
                  indexer_queue_url, 
                  s3_bucket,
                  dynamodb_table,
+                 crawled_table,
                  region='us-east-1',
                  delay=1    # Politeness logic
                  ):
@@ -29,6 +30,7 @@ class Crawler:
         self.indexer_queue_url = indexer_queue_url
         self.s3_bucket = s3_bucket
         self.dynamodb_table = dynamodb_table
+        self.crawled_table = self.dynamodb.Table(self.crawled_table_name)
         self.region = region
         self.delay = delay
         self.is_shutdown = False  # Add shutdown state
@@ -113,8 +115,7 @@ class Crawler:
             logging.warning(f"Error reading robots.txt for URL: {url}")
             return True
 
-    def fetch_url(self, url, max_retries=3, backoff=2):
-        # backoff: wait time in seconds between retries.
+    def fetch_url(self, url):
         logging.info(f"Starting fetch attempt for URL: {url}")
 
         try:
@@ -139,8 +140,16 @@ class Crawler:
 
         title = soup.title.string.strip() if soup.title and soup.title.string else "Untitled"
         text_content = soup.get_text(separator=' ', strip=True)
+        
+        # Extract meta description
         meta_tag = soup.find("meta", attrs={"name": "description"})
         meta_description = meta_tag["content"].strip() if meta_tag and meta_tag.get("content") else ""
+        
+        # Extract keywords
+        keywords_tag = soup.find("meta", attrs={"name": "keywords"})
+        keywords = keywords_tag["content"].strip().split(',') if keywords_tag and keywords_tag.get("content") else []
+        keywords = [k.strip() for k in keywords if k.strip()]  # Clean up keywords
+        
         canonical_tag = soup.find("link", rel="canonical")
         canonical_url = urljoin(base_url, canonical_tag["href"].strip()) if canonical_tag and canonical_tag.get("href") else None
 
@@ -155,7 +164,7 @@ class Crawler:
         urls = list(urls)
         logging.info(f"Extracted {len(urls)} URLs from URL: {base_url}")
 
-        return title, text_content, meta_description, canonical_url, urls
+        return title, text_content, meta_description, keywords, canonical_url, urls
 
 
     def send_to_master(self, url, extracted_urls, depth, status, error=None, assigned_at=None, domain=None):
@@ -181,13 +190,26 @@ class Crawler:
         except Exception as e:
             logging.error(f"Failed to report crawl result to master for URL: {url} | Error: {e}")
 
-    def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content):
+    def record_crawled_url(self, url, domain, depth):
+        try:
+            self.crawled_table.put_item(Item={
+            'url': url,
+            'domain': domain,
+            'depth': depth,
+            'timestamp': datetime.now(timezone.utc).isoformat()
+            })
+            logging.info(f"Recorded crawled URL in DynamoDB: {url}")
+        except Exception as e:
+            logging.warning(f"Failed to record crawled URL: {url} | {e}")
+
+    def upload_content_to_s3(self, url, title, meta_description, keywords, canonical_url, text_content):
         # Upload extracted text content to S3.        
         s3_key = f"crawled_content/{hashlib.md5(url.encode()).hexdigest()}.json"
         content = {
             "url": url,
             "title": title,
             "meta_description": meta_description,
+            "keywords": keywords,
             "canonical_url": canonical_url,
             "text_content": text_content
         }
@@ -334,12 +356,15 @@ class Crawler:
                 html_content = self.fetch_url(url)
 
                 if html_content:
-                    title, text_content, meta_description, canonical_url, extracted_urls = self.extract_content(html_content, url, domain)
+                    title, text_content, meta_description, keywords, canonical_url, extracted_urls = self.extract_content(html_content, url, domain)
                     logging.info(f"Finished processing URL: {url}")
 
                     self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, domain=domain, assigned_at=assigned_at)
                     logging.info(f"Reported successful URL to master: {url}")
-                    s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content)
+                    self.record_crawled_url(url, domain, depth)
+                    logging.info(f"Recorded crawled URL in DynamoDB: {url}")
+                    
+                    s3_key = self.upload_content_to_s3(url, title, meta_description, keywords, canonical_url, text_content)
                     if s3_key:
                         self.send_to_indexer(s3_key, url)
                     else:
@@ -351,13 +376,13 @@ class Crawler:
                     logging.info(f"Reported failed URL to master: {url}")
                     continue
                 # Delete the processed message from queue
-                    try:
-                        self.sqs.delete_message(
-                            QueueUrl=self.crawler_queue_url,
-                            ReceiptHandle=receipt_handle
-                        )
-                        logging.info(f"Deleted message from crawler queue for URL: {url}")
-                    except Exception as e:
-                        logging.error(f"Failed to delete message from queue: {e}")
-                    time.sleep(self.delay)  # Respect delay to avoid hammering servers
+                try:
+                    self.sqs.delete_message(
+                        QueueUrl=self.crawler_queue_url,
+                        ReceiptHandle=receipt_handle
+                    )
+                    logging.info(f"Deleted message from crawler queue for URL: {url}")
+                except Exception as e:
+                    logging.error(f"Failed to delete message from queue: {e}")
+                time.sleep(self.delay)  # Respect delay to avoid hammering servers
 
