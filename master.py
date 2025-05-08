@@ -661,6 +661,7 @@ class MasterNode:
         self.print_crawl_rate()
         self.print_indexing_rate()
         print("=============================")
+        
 
 #!Option 2: Use an AMI (Amazon Machine Image)
 #!Set up one EC2 instance with everything installed and configured.
