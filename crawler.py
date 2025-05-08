@@ -2,14 +2,13 @@ import time
 import json
 import boto3
 import requests
-from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-import logging
-from datetime import datetime, timezone
-import urllib.robotparser
-from urllib.parse import urlparse
 import signal
 import hashlib
+import logging
+import urllib.robotparser
+from datetime import datetime, timezone
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse, urljoin
 
 class Crawler:
     def __init__(self, 
@@ -70,8 +69,12 @@ class Crawler:
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
             )
-            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {time.time()}")
+            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {datetime.now(timezone.utc).isoformat()}")
         
+        except boto3.exceptions.ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logging.error(f"Failed to send heartbeat: AWS ClientError - {error_code}: {error_message}")
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
 
@@ -87,6 +90,11 @@ class Crawler:
                 }
             )
             logging.info(f"Saved crawled URL: {url} to crawled_table")
+        except boto3.exceptions.ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logging.error(f"Failed to save crawled URL: {url} | AWS ClientError - {error_code}: {error_message}")
+            self.send_to_master(url=url, extracted_urls=[], depth=-1, status="failed", error=f"AWS error: {error_code}")
         except Exception as e:
             logging.error(f"Failed to save crawled URL: {url} | Error: {e}")
             self.send_to_master(url=url, extracted_urls=[], depth=-1, status="failed", error=f"Failed to save to crawled_table: {e}")
@@ -109,22 +117,20 @@ class Crawler:
         # backoff: wait time in seconds between retries.
         logging.info(f"Starting fetch attempt for URL: {url}")
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                logging.info(f"Fetching attempt {attempt} for URL: {url}")
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                logging.info(f"Successfully fetched URL: {url} (Status: {response.status_code})")
-                return response.text
-            except Exception as e:
-                logging.warning(f"Error fetching URL: {url} | Error: {str(e)}")
-                logging.warning(f"Attempt {attempt} failed. {3-attempt} attempts remaining.")
-                if attempt < max_retries:
-                    time.sleep(backoff)
-                else:
-                    logging.error(f"All {max_retries} attempts failed to fetch URL: {url}")
-                    return None
-                # DID WE SEND TO MASTER?
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            logging.info(f"Successfully fetched URL: {url} (Status: {response.status_code})")
+            return response.text
+        except requests.exceptions.Timeout:
+            logging.warning(f"Timeout while fetching URL: {url}")
+        except requests.exceptions.ConnectionError:
+            logging.warning(f"Connection error while fetching URL: {url}")
+        except requests.exceptions.HTTPError as e:
+            logging.warning(f"HTTP error while fetching URL: {url} | Status code: {e.response.status_code}")
+        except requests.exceptions.RequestException as e:
+            logging.warning(f"Request error while fetching URL: {url} | Error: {str(e)}")
+        return None
 
 
     def extract_content(self, html_content, base_url, domain):
@@ -143,7 +149,7 @@ class Crawler:
             parsed = urlparse(urljoin(base_url, a['href']))
             url_domain = parsed.netloc.lower()
             if parsed.scheme in ('http', 'https') and (domain is None or domain in url_domain):
-                normalized_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}{parsed.query}{parsed.fragment}"
+                normalized_url = urlunparse((parsed.scheme, parsed.netloc, parsed.path, '', parsed.query, parsed.fragment))
                 if normalized_url != base_url:
                     urls.add(normalized_url)
         urls = list(urls)
@@ -186,9 +192,17 @@ class Crawler:
             "text_content": text_content
         }
         try:
-            self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=json.dumps(content))
+            self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=json.dumps(content).encode('utf-8'))
             logging.info(f"Uploaded content to S3: {s3_key}")
             return s3_key
+        except boto3.exceptions.ClientError as e:
+            error_code = e.response['Error']['Code']
+            error_message = e.response['Error']['Message']
+            logging.error(f"Failed to upload content to S3: AWS ClientError - {error_code}: {error_message}")
+            return None
+        except json.JSONDecodeError as e:
+            logging.error(f"Failed to serialize content to JSON: {str(e)}")
+            return None
         except Exception as e:
             logging.error(f"Failed to upload content to S3: {e}")
             return None
@@ -284,9 +298,6 @@ class Crawler:
                 continue
 
             message = messages[0]
-            if self.shutdown_requested:
-                logging.info("Shutdown requested. Exiting during message processing.")
-                break
 
             logging.info(f"Processing message: {message}")
 
@@ -307,15 +318,7 @@ class Crawler:
                 continue
 
             # Only process URLs if not in shutdown state
-            if not self.is_shutdown:
-                url = body.get('url')
-                depth = body.get('depth', 0)
-                domain = body.get('domain')
-                assigned_at = body.get('assigned_at')
-                logging.info(f"Processing URL: {url}")
-
-                if not self.is_allowed_by_robots(url):
-                    logging.warning(f"This URL is blocked by robots.txt: {url}")
+                    
             url = body.get('url')
             depth = body.get('depth', 0)
             domain = body.get('domain')
@@ -347,16 +350,14 @@ class Crawler:
                     self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to fetch")
                     logging.info(f"Reported failed URL to master: {url}")
                     continue
-
-            # Delete the processed message from queue
-            try:
-                self.sqs.delete_message(
-                    QueueUrl=self.crawler_queue_url,
-                    ReceiptHandle=receipt_handle
-                )
-                logging.info(f"Deleted message from crawler queue for URL: {url}")
-            except Exception as e:
-                logging.error(f"Failed to delete message from queue: {e}")
-
-            time.sleep(self.delay)  # Respect delay to avoid hammering servers
+                # Delete the processed message from queue
+                    try:
+                        self.sqs.delete_message(
+                            QueueUrl=self.crawler_queue_url,
+                            ReceiptHandle=receipt_handle
+                        )
+                        logging.info(f"Deleted message from crawler queue for URL: {url}")
+                    except Exception as e:
+                        logging.error(f"Failed to delete message from queue: {e}")
+                    time.sleep(self.delay)  # Respect delay to avoid hammering servers
 
