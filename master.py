@@ -91,7 +91,16 @@ class MasterNode:
         if self.is_blocked_url(url):
             logging.warning(f"[Master] Skipping blocked URL: {url}")
             return
-        
+        response = self.task_table.get_item(Key={'url': url})
+        if 'Item' in response:
+            existing_task = response['Item']
+            existing_status = existing_task.get('status')
+            existing_depth = existing_task.get('depth', 0)
+            # If URL is already pending with same or lower depth, skip it
+            if existing_status == 'pending' and existing_depth >= depth:
+                logging.info(f"[Master] Skipping URL already pending with depth {existing_depth}: {url}")
+                return       
+                
         try:
             assigned_at = datetime.now(timezone.utc).isoformat()
             message = {
@@ -104,8 +113,11 @@ class MasterNode:
                 QueueUrl=self.crawl_queue_url,
                 MessageBody=json.dumps(message, cls=DecimalEncoder)
             )
-            logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")
-        
+            logging.info(f"[Master] Sent URL to CrawlQueue: {url} (depth={depth})")        
+            
+            
+            # If URL doesn't exist in task table, create new task and send to queue
+            assigned_at = datetime.now(timezone.utc).isoformat()
             self.task_table.put_item(
                 Item={
                     'url': url,
