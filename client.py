@@ -1,10 +1,12 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, redirect, url_for, flash
+from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user, current_user
 import boto3
 import json
 import time
 import uuid
 import logging
 from botocore.exceptions import ClientError
+from werkzeug.security import generate_password_hash, check_password_hash
 
 
 class Client:
@@ -95,7 +97,18 @@ class Client:
                 MessageBody=json.dumps(message)
             )
 
-    def receive_search_results(self):
+    def request_monitoring_data(self):
+        """Request monitoring data from master node via SQS"""
+        message = {
+            "type": "monitoring_request",
+            "client_id": self.client_id
+        }
+        self.sqs.send_message(
+            QueueUrl=self.request_queue_url,
+            MessageBody=json.dumps(message)
+        )
+        
+        # Wait for response
         start = time.time()
         while time.time() - start < self.timeout:
             response = self.sqs.receive_message(
@@ -108,88 +121,43 @@ class Client:
             if messages:
                 message = messages[0]
                 body = json.loads(message['Body'])
-
-                if body.get('client_id') == self.client_id:
+                if body.get('client_id') == self.client_id and body.get('type') == 'monitoring_data':
                     try:
                         self.sqs.delete_message(
                             QueueUrl=self.response_queue_url,
                             ReceiptHandle=message['ReceiptHandle']
                         )
+                        return body.get('data', {})
                     except Exception as e:
                         logging.error(f"Failed to delete message: {str(e)}")
-
-                    return body.get("results", [])
                 else:
                     self.sqs.change_message_visibility(
                         QueueUrl=self.response_queue_url,
                         ReceiptHandle=message['ReceiptHandle'],
                         VisibilityTimeout=0
                     )
-        return []
+        return {}
 
     def count_active_crawlers(self):
-        response = self.dynamodb.Table('CrawlerHeartbeatTable').scan()
-        return sum(1 for item in response['Items'] if item.get('status') == 'running')
+        raise NotImplementedError("Use request_monitoring_data() instead")
 
     def count_crawled_urls(self):
-        response = self.dynamodb.Table('CrawlerTaskAssignmets').scan()
-        return sum(1 for item in response['Items'] if item['status'] == 'done')
+        raise NotImplementedError("Use request_monitoring_data() instead")
 
     def get_crawl_rate(self):
-        now = time.time()
-        elapsed = now - self.last_crawl_time
-        if elapsed > 0:
-            current_count = self.count_crawled_urls()
-            rate = (current_count - self.last_crawl_count) / elapsed
-            self.last_crawl_count = current_count
-            self.last_crawl_time = now
-            return round(rate, 2)
-        return 0
+        raise NotImplementedError("Use request_monitoring_data() instead")
 
     def get_indexing_rate(self):
-        response = self.dynamodb.Table('IndexerTaskAssignments').scan()
-        indexed = sum(1 for item in response['Items'] if item['status'] == 'index_success')
-        now = time.time()
-        elapsed = now - self.last_indexed_time
-        if elapsed > 0:
-            rate = (indexed - self.last_indexed_count) / elapsed
-            self.last_indexed_count = indexed
-            self.last_indexed_time = now
-            return round(rate, 2)
-        return 0
+        raise NotImplementedError("Use request_monitoring_data() instead")
 
     def get_error_rates(self):
-        response = self.dynamodb.Table('IndexerTaskAssignments').scan()
-        items = response['Items']
-        
-        index_success = sum(1 for item in items if item['status'] == 'index_success')
-        index_failed = sum(1 for item in items if item['status'] == 'index_failed')
-        search_success = sum(1 for item in items if item['status'] == 'search_success')
-        search_failed = sum(1 for item in items if item['status'] == 'search_failed')
-
-        total_index = index_success + index_failed
-        total_search = search_success + search_failed
-
-        return {
-            'index_error_rate': round((index_failed / total_index * 100), 2) if total_index > 0 else 0,
-            'search_error_rate': round((search_failed / total_search * 100), 2) if total_search > 0 else 0,
-            'total_indexed': index_success
-        }
+        raise NotImplementedError("Use request_monitoring_data() instead")
 
     def get_crawler_status(self):
-        response = self.dynamodb.Table('CrawlerHeartbeatTable').scan()
-        return {
-            'active': sum(1 for item in response['Items'] if item.get('status') == 'running'),
-            'failed': sum(1 for item in response['Items'] if item.get('status') == 'failed'),
-            'shutdown': sum(1 for item in response['Items'] if item.get('status') == 'shutdown')
-        }
+        raise NotImplementedError("Use request_monitoring_data() instead")
 
     def get_queue_status(self):
-        response = self.sqs.get_queue_attributes(
-            QueueUrl=self.request_queue_url,
-            AttributeNames=['ApproximateNumberOfMessages']
-        )
-        return int(response['Attributes']['ApproximateNumberOfMessages'])
+        raise NotImplementedError("Use request_monitoring_data() instead")
 
 
 client = Client("https://sqs.us-east-1.amazonaws.com/138749495090/RequestQueue", 
@@ -198,6 +166,51 @@ client = Client("https://sqs.us-east-1.amazonaws.com/138749495090/RequestQueue",
 
 # Flask app setup
 app = Flask(__name__)
+app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
+
+# Flask-Login setup
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+# Simple user model
+class User(UserMixin):
+    def __init__(self, id, username, password_hash):
+        self.id = id
+        self.username = username
+        self.password_hash = password_hash
+
+# In-memory user storage (replace with database in production)
+users = {
+    'admin': User('1', 'admin', generate_password_hash('admin123'))  # Change this password
+}
+
+@login_manager.user_loader
+def load_user(user_id):
+    for user in users.values():
+        if user.id == user_id:
+            return user
+    return None
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = users.get(username)
+        
+        if user and check_password_hash(user.password_hash, password):
+            login_user(user)
+            next_page = request.args.get('next')
+            return redirect(next_page or url_for('dashboard'))
+        flash('Invalid username or password')
+    return render_template('login.html')
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('index'))
 
 @app.route('/')
 def index():
@@ -227,18 +240,29 @@ def crawl():
     return render_template('index.html', message=message, seed_urls=seed_urls)
 
 @app.route('/dashboard')
+@login_required
 def dashboard():
-    # Get monitoring information
-    stats = {
-        'active_crawlers': client.count_active_crawlers(),
-        'crawled_urls': client.count_crawled_urls(),
-        'crawl_rate': client.get_crawl_rate(),
-        'indexing_rate': client.get_indexing_rate(),
-        'error_rates': client.get_error_rates(),
-        'crawler_status': client.get_crawler_status(),
-        'queue_status': client.get_queue_status()
-    }
-    return render_template('dashboard.html', stats=stats)
+    # Get monitoring information via SQS
+    monitoring_data = client.request_monitoring_data()
+    if not monitoring_data:
+        monitoring_data = {
+            'active_crawlers': 0,
+            'crawled_urls': 0,
+            'crawl_rate': 0,
+            'indexing_rate': 0,
+            'error_rates': {
+                'index_error_rate': 0,
+                'search_error_rate': 0,
+                'total_indexed': 0
+            },
+            'crawler_status': {
+                'active': 0,
+                'failed': 0,
+                'shutdown': 0
+            },
+            'queue_status': 0
+        }
+    return render_template('dashboard.html', stats=monitoring_data)
 
 
 if __name__ == '__main__':

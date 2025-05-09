@@ -102,7 +102,7 @@
             font-family: inherit;
             font-size: 1rem;
             transition: border-color 0.2s;
-            height: 45px;  /* Set consistent height for all inputs */
+            height: 45px;
         }
         
         input[type="text"]:focus, textarea:focus, select:focus {
@@ -114,7 +114,7 @@
         textarea {
             min-height: 100px;
             resize: vertical;
-            height: auto;  /* Override height for textarea */
+            height: auto;
         }
         
         .search-container {
@@ -142,7 +142,7 @@
         
         .input-row input[type="number"],
         .input-row input[type="text"] {
-            height: 45px;  /* Match the height of search input */
+            height: 45px;
         }
         
         button {
@@ -234,53 +234,6 @@
             font-size: 0.9rem;
         }
         
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 1rem;
-            margin-bottom: 1.5rem;
-        }
-        
-        .stat-card {
-            background: white;
-            border-radius: 8px;
-            padding: 1rem;
-            text-align: center;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-            border: 1px solid var(--border);
-        }
-        
-        .stat-value {
-            font-size: 1.8rem;
-            font-weight: bold;
-            color: var(--primary-dark);
-            margin: 0.5rem 0;
-        }
-        
-        .stat-label {
-            color: var(--text-light);
-            font-size: 0.9rem;
-        }
-        
-        @media (max-width: 768px) {
-            .container {
-                padding: 1rem;
-            }
-            
-            header .container {
-                flex-direction: column;
-                text-align: center;
-            }
-            
-            .search-container {
-                flex-direction: column;
-            }
-            
-            .search-mode {
-                width: 100%;
-            }
-        }
-        
         .nav-links {
             display: flex;
             gap: 1rem;
@@ -301,6 +254,25 @@
         .nav-link.active {
             background-color: rgba(255, 255, 255, 0.2);
         }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+            
+            header .container {
+                flex-direction: column;
+                text-align: center;
+            }
+            
+            .search-container {
+                flex-direction: column;
+            }
+            
+            .search-mode {
+                width: 100%;
+            }
+        }
     </style>
 </head>
 <body>
@@ -318,20 +290,6 @@
     </header>
     
     <div class="container">
-        <div class="card">
-            <h2>Dashboard</h2>
-            <div class="stats-grid">
-                <div class="stat-card">
-                    <div class="stat-value">3</div>
-                    <div class="stat-label">Active Crawlers</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-value">12,456</div>
-                    <div class="stat-label">Pages Indexed</div>
-                </div>
-            </div>
-        </div>
-        
         <div class="card">
             <h2>Search</h2>
             <form action="/search" method="POST">

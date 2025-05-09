@@ -105,26 +105,16 @@ class Crawler:
             logging.warning(f"Error reading robots.txt for URL: {url}")
             return True
 
-    def fetch_url(self, url, max_retries=3, backoff=2):
-        # backoff: wait time in seconds between retries.
+    def fetch_url(self, url):
         logging.info(f"Starting fetch attempt for URL: {url}")
-
-        for attempt in range(1, max_retries + 1):
-            try:
-                logging.info(f"Fetching attempt {attempt} for URL: {url}")
-                response = requests.get(url, timeout=10)
-                response.raise_for_status()
-                logging.info(f"Successfully fetched URL: {url} (Status: {response.status_code})")
-                return response.text
-            except Exception as e:
-                logging.warning(f"Error fetching URL: {url} | Error: {str(e)}")
-                logging.warning(f"Attempt {attempt} failed. {3-attempt} attempts remaining.")
-                if attempt < max_retries:
-                    time.sleep(backoff)
-                else:
-                    logging.error(f"All {max_retries} attempts failed to fetch URL: {url}")
-                    return None
-                # DID WE SEND TO MASTER?
+        try:
+            response = requests.get(url, timeout=10)
+            response.raise_for_status()
+            logging.info(f"Successfully fetched URL: {url} (Status: {response.status_code})")
+            return response.text
+        except Exception as e:
+            logging.warning(f"Error fetching URL: {url} | Error: {str(e)}")
+            return None
 
 
     def extract_content(self, html_content, base_url, domain):

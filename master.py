@@ -169,6 +169,7 @@ class MasterNode:
             for message in messages:
                 body = json.loads(message['Body'])
                 msg_type = body.get('type')
+                client_id = body.get('client_id')
 
                 if msg_type == 'search':
                     self.sqs.send_message(
@@ -200,11 +201,35 @@ class MasterNode:
                         MessageBody=json.dumps(body)
                     )
                     logging.info(f"[Request] Forwarded crawl request to crawl queue: {body}")
+                elif msg_type == 'monitoring_request':
+                    # Collect monitoring data
+                    monitoring_data = {
+                        'active_crawlers': self.count_active_crawlers(),
+                        'crawled_urls': self.count_crawled_urls(),
+                        'crawl_rate': self.get_crawl_rate(),
+                        'indexing_rate': self.get_indexing_rate(),
+                        'error_rates': self.get_error_rates(),
+                        'crawler_status': self.get_crawler_status(),
+                        'queue_status': self.get_queue_status()
+                    }
+                    
+                    # Send monitoring data back to client
+                    response_message = {
+                        'type': 'monitoring_data',
+                        'client_id': client_id,
+                        'data': monitoring_data
+                    }
+                    self.sqs.send_message(
+                        QueueUrl=self.ResponseQueue,
+                        MessageBody=json.dumps(response_message)
+                    )
+                    logging.info(f"[Request] Sent monitoring data to client {client_id}")
 
                 self.sqs.delete_message(
                     QueueUrl=self.request_queue_url,
                     ReceiptHandle=message['ReceiptHandle']
                 )
+
     def send_shutdown_signal_to_crawlers(self):
         logging.info("[Master] Sending shutdown signals to crawlers...")
         response = self.heartbeat_table.scan()
@@ -219,6 +244,7 @@ class MasterNode:
                 MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
             )
             logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
+
     def monitor_indexer_feedback(self):
         logging.info("[Monitor] Checking indexer feedback queue...")  #! Add logging for indexer feedback
         while True:
