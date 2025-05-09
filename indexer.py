@@ -46,7 +46,7 @@ class Indexer:
         try:
             self.heartbeat_table.put_item(
                 Item={
-                    'cralwer_id': self.indexer_id,
+                    'indexer_id': self.indexer_id,
                     'status': 'running',
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
@@ -327,3 +327,4 @@ class Indexer:
 
 
 
+ 
