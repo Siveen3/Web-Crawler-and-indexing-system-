@@ -51,7 +51,7 @@ class Indexer:
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
             )
-            logging.info(f"Heartbeat sent for indexer {self.indexer_id} at {time.time()}")
+            logging.info(f"Heartbeat sent for indexer {self.indexer_id} at {datetime.now()}")
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
 
@@ -305,8 +305,6 @@ class Indexer:
                     self.send_to_master(search_result, self.statuses[2], query=query)
                     logging.info(f"{datetime.now()} - Processed search query: {query}")
 
-
-                
                 try:
                     self.sqs.delete_message(
                         QueueUrl=self.search_queue_url,

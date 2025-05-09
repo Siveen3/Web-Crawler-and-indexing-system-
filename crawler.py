@@ -41,7 +41,7 @@ class Crawler:
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
         self.crawled_table = self.dynamodb.Table(self.dynamodb_table)
         # Configure logging to show time, log level, and message
-        logging.basicConfig(filename='crawler_node.log', filemode='w', level=logging.INFO, 
+        logging.basicConfig(filename=f'crawler_{self.crawler_id}.log', filemode='w', level=logging.INFO, 
                             format='%(asctime)s [%(levelname)s] %(message)s')
         
         # Handle graceful shutdown
