@@ -18,8 +18,8 @@ es = OpenSearch(
 
 indexer = Indexer(es=es,
                   index_name="content_index", 
-                  dynamodb_table="CrawlerHeartbeatTable", 
-                  s3_bucket="crawler-indexer-bucket", 
+                  dynamodb_table="IndexerHeartbeatTable", 
+                  s3_bucket="crawler-indexer-buckets", 
                   content_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/IndexQueue', 
                   search_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/SearchQueue', 
                   response_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/FeedbackQueue',
