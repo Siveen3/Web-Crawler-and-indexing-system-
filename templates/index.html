@@ -94,7 +94,7 @@
             color: var(--secondary);
         }
         
-        input[type="text"], textarea, select {
+        input[type="text"], textarea, select, input[type="number"] {
             width: 100%;
             padding: 0.8rem;
             border: 1px solid var(--border);
@@ -102,6 +102,7 @@
             font-family: inherit;
             font-size: 1rem;
             transition: border-color 0.2s;
+            height: 45px;  /* Set consistent height for all inputs */
         }
         
         input[type="text"]:focus, textarea:focus, select:focus {
@@ -113,6 +114,7 @@
         textarea {
             min-height: 100px;
             resize: vertical;
+            height: auto;  /* Override height for textarea */
         }
         
         .search-container {
@@ -126,6 +128,21 @@
         
         .search-mode {
             width: 200px;
+        }
+        
+        .input-row {
+            display: flex;
+            gap: 1rem;
+            align-items: flex-start;
+        }
+        
+        .input-row .form-group {
+            flex: 1;
+        }
+        
+        .input-row input[type="number"],
+        .input-row input[type="text"] {
+            height: 45px;  /* Match the height of search input */
         }
         
         button {
@@ -174,6 +191,10 @@
             margin-bottom: 0.5rem;
             display: block;
             word-break: break-all;
+            max-width: 100%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         
         .result-url:hover {
@@ -259,6 +280,27 @@
                 width: 100%;
             }
         }
+        
+        .nav-links {
+            display: flex;
+            gap: 1rem;
+        }
+        
+        .nav-link {
+            color: white;
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            transition: background-color 0.2s;
+        }
+        
+        .nav-link:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        
+        .nav-link.active {
+            background-color: rgba(255, 255, 255, 0.2);
+        }
     </style>
 </head>
 <body>
@@ -266,7 +308,11 @@
         <div class="container">
             <div class="logo">
                 <span class="logo-icon">🕸️</span>
-                <h1>website</h1>
+                <h1>Search - Crawl</h1>
+            </div>
+            <div class="nav-links">
+                <a href="/" class="nav-link active">Client Interface</a>
+                <a href="/dashboard" class="nav-link">Dashboard</a>
             </div>
         </div>
     </header>
@@ -307,19 +353,20 @@
             {% if query %}
             <div class="results-container">
                 <h3>Results for "{{ query }}":</h3>
-                <p>Search mode: 
+                <p>Search mode:
                     {% if selected_mode == 'or' %}Include any (OR)
-                    {% elif selected_mode == 'and' %}Include all (AND)
+                    {% elif selected_mode == 'and' or not selected_mode %}Include all (AND)
                     {% elif selected_mode == 'phrase' %}Exact (Phrase)
                     {% endif %}
                 </p>
-                
+
                 {% if results %}
                 <div class="results">
                     {% for result in results %}
                     <div class="result-item">
                         <div class="result-title">{{ result.title }}</div>
-                        <a href="{{ result.url }}" target="_blank" class="result-url">{{ result.url }}</a>
+                        <a href="{{ result.url }}" target="_blank" class="result-url" 
+                           aria-label="Visit {{ result.title }}">{{ result.url }}</a>
                         {% if result.highlight %}
                         <div class="result-highlight">
                             {% for field, snippets in result.highlight.items() %}
@@ -346,16 +393,20 @@
             <form action="/crawl" method="POST">
                 <div class="form-group">
                     <label for="seeds">Seed URLs:</label>
-                    <textarea id="seeds" name="seeds" placeholder="Enter one URL per line (e.g., https://example.com)" required>{% if seed_urls %}{{ '\n'.join(seed_urls) }}{% endif %}</textarea>
-                    <small style="color: var(--text-light); display: block; margin-top: 0.3rem;">For best results, include complete URLs with protocol (http:// or https://)</small>
+                    <textarea id="seeds" name="seeds" placeholder="Enter one URL per line (e.g., https://example.com)" 
+                             required maxlength="2000" aria-label="Seed URLs for crawling"></textarea>
                 </div>
-                <div class="form-group">
-                    <label for="depth">Depth Limit:</label>
-                    <input type="number" id="depth" name="depth" min="1" max="10" value="2" required>
-                </div>
-                <div class="form-group">
-                    <label for="domain">Domain Restriction </label>
-                    <input type="text" id="domain" name="domain" placeholder="e.g., example.com">
+                <div class="input-row">
+                    <div class="form-group">
+                        <label for="depth">Depth Limit:</label>
+                        <input type="number" id="depth" name="depth" min="1" max="10" value="2" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="domain">Domain Restriction</label>
+                        <input type="text" id="domain" name="domain" placeholder="e.g., example.com" 
+                               pattern="^[a-zA-Z0-9][a-zA-Z0-9-]{1,61}[a-zA-Z0-9]\.[a-zA-Z]{2,}$"
+                               title="Please enter a valid domain name (e.g., example.com)">
+                    </div>
                 </div>
                 <button type="submit">🚀 Submit Seed URLs</button>
             </form>
