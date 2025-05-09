@@ -80,7 +80,8 @@ class Indexer:
                         "url": {"type": "keyword"},
                         "title": {"type": "text", "analyzer": "english_analyzer"},
                         "content": {"type": "text", "analyzer": "english_analyzer"},
-                        "meta_description": {"type": "text", "analyzer": "english_analyzer"}
+                        "meta_description": {"type": "text", "analyzer": "english_analyzer"},
+                        "meta_keywords": {"type": "text", "analyzer": "english_analyzer"}
                     }
                 }
             }
@@ -95,12 +96,13 @@ class Indexer:
         text = re.sub(r'[^a-z\s0-9]', '', text.lower()) # Remove special characters and punctuation
         return re.sub(r'\s+', ' ', text).strip() # Remove extra spaces
 
-    def index_document(self, url, title, content, meta_description=None):
+    def index_document(self, url, title, content, meta_description=None, meta_keywords=None):
         doc = {
             "url": url,
             "title": title,
             "content": self.preprocess_text(content),
-            "meta_description": self.preprocess_text(meta_description) if meta_description else ""
+            "meta_description": self.preprocess_text(meta_description) if meta_description else "",
+            "meta_keywords": meta_keywords if meta_keywords else []
         }
         try:
             self.es.index(index=self.index_name, id=url, body=doc)
@@ -127,7 +129,6 @@ class Indexer:
         return None
 
     def search_index(self, query, mode="and", client_id=None):
-        
         mode = mode.lower() if mode else "and"
         
         if mode == "phrase":
@@ -140,7 +141,7 @@ class Indexer:
             boost_query = {
                 "multi_match": {
                     "query": query,
-                    "fields": ["title^3", "meta_description^2"],
+                    "fields": ["title^3", "meta_description^2", "meta_keywords^2"],
                     "type": "phrase"
                 }
             }
@@ -157,7 +158,7 @@ class Indexer:
             boost_query = {
                 "multi_match": {
                     "query": query,
-                    "fields": ["title^3", "meta_description^2"],
+                    "fields": ["title^3", "meta_description^2", "meta_keywords^2"],
                     "operator": mode,
                     "fuzziness": "AUTO"
                 }
@@ -175,7 +176,8 @@ class Indexer:
                 "fields": {
                     "content": {"number_of_fragments": 3},
                     "title": {},
-                    "meta_description": {}
+                    "meta_description": {},
+                    "meta_keywords": {}
                 }
             }
         }
@@ -243,7 +245,6 @@ class Indexer:
             message = message_content[0]
             body = json.loads(message['Body'])
              
-            
             s3_key = body.get('s3_key')
             url = body.get('url')
 
@@ -253,16 +254,16 @@ class Indexer:
                 return
             title = content.get('title', '')
             meta_description = content.get('meta_description', '')
+            meta_keywords = content.get('meta_keywords', [])
             canonical_url = content.get('canonical_url', '')
             text_content = content.get('text_content', '')
-
-
 
             self.index_document(
                 url=canonical_url if canonical_url else url,
                 title=title,
                 content=text_content,
-                meta_description=meta_description
+                meta_description=meta_description,
+                meta_keywords=meta_keywords
             )
             
             try:
@@ -293,13 +294,11 @@ class Indexer:
             message = message_search[0]
             body = json.loads(message['Body'])
              
-            
             query = body.get('query')
             client_id = body.get('client_id')
             mode = body.get('mode')
             
             if query:
-               
                 search_result = self.search_index(query, mode, client_id)
 
                 if search_result:
@@ -313,7 +312,6 @@ class Indexer:
                         QueueUrl=self.search_queue_url,
                         ReceiptHandle= message['ReceiptHandle']
                     )
-                    logging.info(f"Deleted search message for query: {query}")
                 except Exception as e:
                     logging.error(f"Error deleting message from search queue: {e}")
 

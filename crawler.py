@@ -70,7 +70,7 @@ class Crawler:
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
             )
-            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {time.time()}")
+            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {datetime.now()}")
         
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")
@@ -123,8 +123,17 @@ class Crawler:
 
         title = soup.title.string.strip() if soup.title and soup.title.string else "Untitled"
         text_content = soup.get_text(separator=' ', strip=True)
+        
+        # Extract meta description
         meta_tag = soup.find("meta", attrs={"name": "description"})
         meta_description = meta_tag["content"].strip() if meta_tag and meta_tag.get("content") else ""
+        
+        # Extract meta keywords
+        keywords = []
+        keywords_tag = soup.find("meta", attrs={"name": "keywords"})
+        if keywords_tag and keywords_tag.get("content"):
+            keywords = [k.strip() for k in keywords_tag["content"].split(",")]
+        
         canonical_tag = soup.find("link", rel="canonical")
         canonical_url = urljoin(base_url, canonical_tag["href"].strip()) if canonical_tag and canonical_tag.get("href") else None
 
@@ -139,7 +148,7 @@ class Crawler:
         urls = list(urls)
         logging.info(f"Extracted {len(urls)} URLs from URL: {base_url}")
 
-        return title, text_content, meta_description, canonical_url, urls
+        return title, text_content, meta_description, canonical_url, urls, keywords
 
 
     def send_to_master(self, url, extracted_urls, depth, status, error=None, assigned_at=None, domain=None):
@@ -165,7 +174,7 @@ class Crawler:
         except Exception as e:
             logging.error(f"Failed to report crawl result to master for URL: {url} | Error: {e}")
 
-    def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content):
+    def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content, keywords):
         # Upload extracted text content to S3.        
         s3_key = f"crawled_content/{hashlib.md5(url.encode()).hexdigest()}.json"
         content = {
@@ -173,7 +182,8 @@ class Crawler:
             "title": title,
             "meta_description": meta_description,
             "canonical_url": canonical_url,
-            "text_content": text_content
+            "text_content": text_content,
+            "keywords": keywords
         }
         try:
             self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=json.dumps(content))
@@ -278,8 +288,6 @@ class Crawler:
                 logging.info("Shutdown requested. Exiting during message processing.")
                 break
 
-            logging.info(f"Processing message: {message}")
-
             receipt_handle = message['ReceiptHandle']
             body = json.loads(message['Body'])
             
@@ -305,37 +313,27 @@ class Crawler:
                 logging.info(f"Processing URL: {url}")
 
                 if not self.is_allowed_by_robots(url):
-                    logging.warning(f"This URL is blocked by robots.txt: {url}")
-            url = body.get('url')
-            depth = body.get('depth', 0)
-            domain = body.get('domain')
-            assigned_at = body.get('assigned_at')
-            logging.info(f"Processing URL: {url}")
+                    logging.warning(f"URL blocked by robots.txt: {url}")
+                    self.send_to_master(url=url, extracted_urls=[], depth=depth, status="skipped", error="robots.txt disallowed")
+                    continue
 
-            if not self.is_allowed_by_robots(url):
-                logging.warning(f"This URL is blocked by robots.txt: {url}")
-                self.send_to_master(url=url, extracted_urls=[], depth=depth, status="skipped", error="robots.txt disallowed")
-                logging.info(f"Reported blocked URL to master: {url}")
-
-            else:
                 html_content = self.fetch_url(url)
 
                 if html_content:
-                    title, text_content, meta_description, canonical_url, extracted_urls = self.extract_content(html_content, url, domain)
-                    logging.info(f"Finished processing URL: {url}")
+                    title, text_content, meta_description, canonical_url, extracted_urls, keywords = self.extract_content(html_content, url, domain)
+                    logging.info(f"Successfully processed URL: {url}")
 
                     self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, domain=domain, assigned_at=assigned_at)
-                    logging.info(f"Reported successful URL to master: {url}")
-                    s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content)
+                    s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content, keywords)
                     if s3_key:
                         self.send_to_indexer(s3_key, url)
                     else:
-                        logging.error(f"Skipping indexer send due to failed S3 upload for URL: {url}")
+                        logging.error(f"Failed to upload content to S3 for URL: {url}")
                         self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to upload to S3")
                         continue
                 else:
+                    logging.error(f"Failed to fetch URL: {url}")
                     self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to fetch")
-                    logging.info(f"Reported failed URL to master: {url}")
                     continue
 
             # Delete the processed message from queue
@@ -346,6 +344,6 @@ class Crawler:
                 )
                 logging.info(f"Deleted message from crawler queue for URL: {url}")
             except Exception as e:
-                logging.error(f"Failed to delete message from queue: {e}")
+                logging.error(f"Failed to delete message from queue for URL {url}: {e}")
 
             time.sleep(self.delay)  # Respect delay to avoid hammering servers
