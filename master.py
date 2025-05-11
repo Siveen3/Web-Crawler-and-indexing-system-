@@ -141,16 +141,230 @@ class MasterNode:
             raise
 
     def wake_up_crawler(self, crawler_id):
-        """Wake up a specific crawler by sending a wake-up signal"""
-        wake_message = {
-            "wake_up": True,
-            "crawler_id": crawler_id
-        }
-        self.sqs.send_message(
-            QueueUrl=self.crawl_queue_url,
-            MessageBody=json.dumps(wake_message, cls=DecimalEncoder)
-        )
-        logging.info(f"[Master] Sent wake-up signal to {crawler_id}")
+        """Wake up a crawler that's in shutdown state"""
+        try:
+            wake_message = {
+                "wake_up": True,
+                "crawler_id": crawler_id
+            }
+            self.sqs.send_message(
+                QueueUrl=self.crawl_queue_url,
+                MessageBody=json.dumps(wake_message, cls=DecimalEncoder)
+            )
+            
+            # Update heartbeat table to mark as starting
+            self.heartbeat_table.update_item(
+                Key={'crawler_id': crawler_id},
+                UpdateExpression="SET #s = :s, last_heartbeat = :t",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":s": "starting",
+                    ":t": datetime.now(timezone.utc).isoformat()
+                }
+            )
+            logging.info(f"[Crawler] Sent wake-up signal to {crawler_id}")
+            return True
+        except Exception as e:
+            logging.error(f"[Crawler] Failed to wake up crawler {crawler_id}: {str(e)}")
+            return False
+
+    def verify_crawler_state(self, crawler_id):
+        """Verify crawler state is consistent between EC2 and heartbeat table"""
+        try:
+            # Check EC2 state
+            ec2 = boto3.client('ec2', region_name=self.region_name)
+            response = ec2.describe_instances(InstanceIds=[crawler_id])
+            if not response['Reservations']:
+                return False
+            ec2_state = response['Reservations'][0]['Instances'][0]['State']['Name']
+            
+            # Check heartbeat state
+            heartbeat_response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_id})
+            if 'Item' not in heartbeat_response:
+                return False
+            heartbeat_state = heartbeat_response['Item'].get('status')
+            
+            # State should be consistent
+            if ec2_state == 'running' and heartbeat_state == 'running':
+                return True
+            elif ec2_state == 'running' and heartbeat_state == 'shutdown':
+                # Crawler is running but marked as shutdown - update heartbeat
+                self.heartbeat_table.update_item(
+                    Key={'crawler_id': crawler_id},
+                    UpdateExpression="SET #s = :s, last_heartbeat = :t",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={
+                        ":s": "running",
+                        ":t": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+                return True
+            elif ec2_state == 'stopped' and heartbeat_state == 'running':
+                # Crawler is stopped but marked as running - update heartbeat
+                self.heartbeat_table.update_item(
+                    Key={'crawler_id': crawler_id},
+                    UpdateExpression="SET #s = :s",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":s": "shutdown"}
+                )
+                return True
+            
+            return False
+        except Exception as e:
+            logging.error(f"[Verify] Error verifying crawler {crawler_id} state: {str(e)}")
+            return False
+
+    def wait_for_crawler_ready(self, crawler_id, timeout=300):
+        """Wait for a crawler to be fully ready (running and in heartbeat table)"""
+        logging.info(f"[Startup] Waiting for crawler {crawler_id} to be ready...")
+        start_time = time.time()
+        consecutive_failures = 0
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Verify both EC2 and heartbeat states
+                if not self.verify_crawler_state(crawler_id):
+                    consecutive_failures += 1
+                    if consecutive_failures >= 3:  # 3 consecutive failures
+                        logging.error(f"[Startup] Crawler {crawler_id} failed to stabilize")
+                        return False
+                    time.sleep(10)
+                    continue
+                
+                # Check if crawler is in heartbeat table and running
+                response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_id})
+                if 'Item' in response:
+                    status = response['Item'].get('status')
+                    last_heartbeat = response['Item'].get('last_heartbeat')
+                    
+                    if status == 'running':
+                        # Verify heartbeat is recent (within last 30 seconds)
+                        if last_heartbeat:
+                            last_heartbeat_time = datetime.fromisoformat(last_heartbeat)
+                            if (datetime.now(timezone.utc) - last_heartbeat_time).total_seconds() <= 30:
+                                logging.info(f"[Startup] Crawler {crawler_id} is fully ready")
+                                return True
+                
+                consecutive_failures = 0  # Reset on successful check
+                time.sleep(10)  # Check every 10 seconds
+                
+            except Exception as e:
+                logging.error(f"[Startup] Error checking crawler {crawler_id}: {str(e)}")
+                consecutive_failures += 1
+                if consecutive_failures >= 3:
+                    return False
+                time.sleep(10)
+        
+        logging.error(f"[Startup] Timeout waiting for crawler {crawler_id}")
+        return False
+
+    def initialize_crawler_pool(self):
+        """Initialize the crawler pool with 2 crawlers, then put one in shutdown"""
+        logging.info("[Startup] Initializing crawler pool...")
+        try:
+            # Start two crawlers
+            crawler_ids = []
+            for _ in range(2):
+                instance_id = self.start_backup_crawler()
+                if instance_id:
+                    crawler_ids.append(instance_id)
+            
+            if len(crawler_ids) < 2:
+                raise Exception("Failed to start initial crawlers")
+            
+            # Wait for both crawlers to be ready
+            for crawler_id in crawler_ids:
+                if not self.wait_for_crawler_ready(crawler_id):
+                    # Cleanup failed crawler
+                    try:
+                        ec2 = boto3.client('ec2', region_name=self.region_name)
+                        ec2.terminate_instances(InstanceIds=[crawler_id])
+                        self.heartbeat_table.delete_item(Key={'crawler_id': crawler_id})
+                    except Exception as e:
+                        logging.error(f"[Startup] Failed to cleanup crawler {crawler_id}: {str(e)}")
+                    raise Exception(f"Crawler {crawler_id} failed to become ready")
+            
+            # Verify crawler states one final time
+            for crawler_id in crawler_ids:
+                if not self.verify_crawler_state(crawler_id):
+                    raise Exception(f"Crawler {crawler_id} state verification failed")
+            
+            # Put one crawler into shutdown state
+            crawler_to_shutdown = crawler_ids[0]
+            self.send_shutdown_signal_to_crawler(crawler_to_shutdown)
+            
+            # Wait for shutdown to take effect
+            shutdown_timeout = 60  # 1 minute timeout
+            start_time = time.time()
+            while time.time() - start_time < shutdown_timeout:
+                response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_to_shutdown})
+                if 'Item' in response and response['Item'].get('status') == 'shutdown':
+                    logging.info(f"[Startup] Successfully put crawler {crawler_to_shutdown} into shutdown state")
+                    return True
+                time.sleep(5)
+            
+            raise Exception(f"Failed to put crawler {crawler_to_shutdown} into shutdown state")
+            
+        except Exception as e:
+            logging.error(f"[Startup] Failed to initialize crawler pool: {str(e)}")
+            # Cleanup any remaining crawlers
+            for crawler_id in crawler_ids:
+                try:
+                    ec2 = boto3.client('ec2', region_name=self.region_name)
+                    ec2.terminate_instances(InstanceIds=[crawler_id])
+                    self.heartbeat_table.delete_item(Key={'crawler_id': crawler_id})
+                except Exception as cleanup_error:
+                    logging.error(f"[Startup] Failed to cleanup crawler {crawler_id}: {str(cleanup_error)}")
+            return False
+
+    def send_shutdown_signal_to_crawler(self, crawler_id):
+        """Send shutdown signal to a crawler with verification"""
+        try:
+            # Verify crawler exists and is running
+            if not self.verify_crawler_state(crawler_id):
+                logging.error(f"[Shutdown] Cannot shutdown crawler {crawler_id} - invalid state")
+                return False
+
+            # Check if crawler is already in shutdown state
+            response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_id})
+            if 'Item' in response and response['Item'].get('status') == 'shutdown':
+                logging.info(f"[Shutdown] Crawler {crawler_id} is already in shutdown state")
+                return True
+
+            # Send shutdown signal
+            shutdown_message = {
+                "shutdown": True,
+                "crawler_id": crawler_id
+            }
+            self.sqs.send_message(
+                QueueUrl=self.crawl_queue_url,
+                MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
+            )
+            
+            # Update heartbeat table to mark as shutdown
+            self.heartbeat_table.update_item(
+                Key={'crawler_id': crawler_id},
+                UpdateExpression="SET #s = :s",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": "shutdown"}
+            )
+            
+            # Verify shutdown state
+            shutdown_timeout = 60  # 1 minute timeout
+            start_time = time.time()
+            while time.time() - start_time < shutdown_timeout:
+                response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_id})
+                if 'Item' in response and response['Item'].get('status') == 'shutdown':
+                    logging.info(f"[Shutdown] Successfully put crawler {crawler_id} into shutdown state")
+                    return True
+                time.sleep(5)
+            
+            logging.error(f"[Shutdown] Failed to verify shutdown state for crawler {crawler_id}")
+            return False
+            
+        except Exception as e:
+            logging.error(f"[Shutdown] Failed to send shutdown signal to {crawler_id}: {str(e)}")
+            return False
 
     def monitor_client_requests(self):
         logging.info("[Monitor] Listening for client requests...")
@@ -367,7 +581,10 @@ class MasterNode:
         self.monitor_health(self.indexer_heartbeat_table_name, 'indexer')
 
     def handle_failed_crawler(self, crawler_item):
+        """Handle a failed crawler by attempting to reboot it"""
+        crawler_id = crawler_item.get('crawler_id')
         failed_task_url = crawler_item.get('current_task_url')
+        
         if failed_task_url:
             # Check if the task is still pending and not already failed/timed out
             task = self.task_table.get_item(Key={'url': failed_task_url}).get('Item')
@@ -379,86 +596,232 @@ class MasterNode:
                     UpdateExpression="SET assigned_at = :t",
                     ExpressionAttributeValues={":t": now.isoformat()}
                 )
-                logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_item['crawler_id']}")
+                logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_id}")
 
-        # Check for shutdown crawlers
-        response = self.heartbeat_table.scan()
-        shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
-
-        if not shutdown_crawlers:
-            logging.info("[Recovery] No shutdown crawlers found. Starting a new EC2 instance.")
-            self.start_backup_crawler()
-        else:
-            crawler_id = shutdown_crawlers[0]
-            logging.info(f"[Recovery] Waking up shutdown crawler: {crawler_id}")
-            self.wake_up_crawler(crawler_id)
-
-    def start_backup_crawler(self):
-        """Start a new crawler instance from the AMI"""
-        ec2 = boto3.client('ec2', region_name=self.region_name)
         try:
-            # Get the latest AMI ID for our crawler
-            response = ec2.describe_images(
+            # Try to reboot the failed crawler
+            ec2 = boto3.client('ec2', region_name=self.region_name)
+            response = ec2.describe_instances(
                 Filters=[
                     {
-                        'Name': 'name',
-                        'Values': ['crawler-ami-*']
+                        'Name': 'tag:Name',
+                        'Values': ['CrawlerNode']
+                    },
+                    {
+                        'Name': 'instance-state-name',
+                        'Values': ['running', 'pending', 'stopping', 'stopped']
                     }
                 ]
             )
             
-            if not response['Images']:
-                logging.error("[Recovery] No crawler AMI found!")
-                return
-                
-            # Sort by creation date and get the latest
-            latest_ami = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)[0]
-            ami_id = latest_ami['ImageId']
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    if instance['InstanceId'] == crawler_id:
+                        try:
+                            ec2.reboot_instances(InstanceIds=[crawler_id])
+                            logging.info(f"[Recovery] Attempting to reboot failed crawler {crawler_id}")
+                            
+                            # Update heartbeat table to mark as recovering
+                            self.heartbeat_table.update_item(
+                                Key={'crawler_id': crawler_id},
+                                UpdateExpression="SET #s = :s, last_heartbeat = :t",
+                                ExpressionAttributeNames={"#s": "status"},
+                                ExpressionAttributeValues={
+                                    ":s": "recovering",
+                                    ":t": datetime.now(timezone.utc).isoformat()
+                                }
+                            )
+                            return True
+                        except Exception as e:
+                            logging.error(f"[Recovery] Failed to reboot crawler {crawler_id}: {str(e)}")
+                            break
+                break
             
-            # Launch instance from AMI
-            response = ec2.run_instances(
-                ImageId=ami_id,
-                InstanceType='t2.micro',
-                MinCount=1,
-                MaxCount=1,
-                TagSpecifications=[
-                    {
-                        'ResourceType': 'instance',
-                        'Tags': [
-                            {
-                                'Key': 'Name',
-                                'Value': 'CrawlerNode'
-                            }
-                        ]
-                    }
-                ],
-                UserData='''#!/bin/bash
-                cd /home/ubuntu
-                # Activate virtual environment
-                source crawler-venv/bin/activate
-                # Set environment variables
-                export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
-                export MASTER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue"
-                export INDEXER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/IndexQueue"
-                export S3_BUCKET="crawler-indexer-buckets"
-                export DYNAMODB_TABLE="CrawlerHeartbeatTable"
-                export AWS_REGION="us-east-1"
-                export CRAWLER_DELAY="10"
-                # Run the crawler
-                python crawler_object.py
-                '''
-            )
-            
-            instance_id = response['Instances'][0]['InstanceId']
-            logging.info(f"[Recovery] Starting backup crawler node with instance ID: {instance_id}")
-            
-            # Wait for the instance to be running
-            waiter = ec2.get_waiter('instance_running')
-            waiter.wait(InstanceIds=[instance_id])
-            logging.info(f"[Recovery] Backup crawler node {instance_id} is now running.")
+            # If reboot failed or crawler not found, start a new one
+            logging.info(f"[Recovery] Starting new crawler to replace failed crawler {crawler_id}")
+            self.start_backup_crawler()
+            return True
             
         except Exception as e:
-            logging.error(f"[Recovery] Failed to start backup crawler: {e}")
+            logging.error(f"[Recovery] Error in crawler recovery process: {str(e)}")
+            return False
+
+    def wait_for_instance_running(self, instance_id, timeout=300):
+        """Wait for an instance to be fully running and ready
+        
+        Args:
+            instance_id (str): The ID of the instance to wait for
+            timeout (int): Maximum time to wait in seconds (default 5 minutes)
+            
+        Returns:
+            bool: True if instance is running and ready, False if timeout
+        """
+        logging.info(f"[Instance] Waiting for instance {instance_id} to be ready...")
+        start_time = time.time()
+        ec2 = boto3.client('ec2', region_name=self.region_name)
+        
+        while time.time() - start_time < timeout:
+            try:
+                # Check instance state
+                response = ec2.describe_instances(InstanceIds=[instance_id])
+                state = response['Reservations'][0]['Instances'][0]['State']['Name']
+                
+                if state == 'running':
+                    # Check if instance is in heartbeat table (indicating crawler is ready)
+                    response = self.heartbeat_table.scan(
+                        FilterExpression='crawler_id = :id',
+                        ExpressionAttributeValues={':id': instance_id}
+                    )
+                    if response.get('Items'):
+                        logging.info(f"[Instance] Instance {instance_id} is fully ready")
+                        return True
+                
+                elif state in ['terminated', 'shutting-down']:
+                    logging.error(f"[Instance] Instance {instance_id} is terminating")
+                    return False
+                
+                time.sleep(10)  # Wait 10 seconds before next check
+                
+            except Exception as e:
+                logging.error(f"[Instance] Error checking instance {instance_id}: {str(e)}")
+                time.sleep(10)
+        
+        logging.error(f"[Instance] Timeout waiting for instance {instance_id}")
+        return False
+
+    def get_running_instances(self):
+        """Get list of running crawler instances that are fully ready"""
+        try:
+            ec2 = boto3.client('ec2', region_name=self.region_name)
+            response = ec2.describe_instances(
+                Filters=[
+                    {
+                        'Name': 'tag:Name',
+                        'Values': ['CrawlerNode']
+                    },
+                    {
+                        'Name': 'instance-state-name',
+                        'Values': ['running', 'pending']
+                    }
+                ]
+            )
+            
+            running_instances = []
+            pending_instances = []
+            
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    instance_id = instance['InstanceId']
+                    state = instance['State']['Name']
+                    
+                    if state == 'running':
+                        # Check if instance is in heartbeat table
+                        response = self.heartbeat_table.scan(
+                            FilterExpression='crawler_id = :id',
+                            ExpressionAttributeValues={':id': instance_id}
+                        )
+                        if response.get('Items'):
+                            running_instances.append(instance_id)
+                        else:
+                            pending_instances.append(instance_id)
+                    elif state == 'pending':
+                        pending_instances.append(instance_id)
+            
+            return running_instances, pending_instances
+            
+        except Exception as e:
+            logging.error(f"[Instance] Error getting running instances: {str(e)}")
+            return [], []
+
+    def start_backup_crawler(self):
+        """Start a new crawler instance from the AMI and wait for it to be ready"""
+        try:
+            # First check if we already have enough instances starting up
+            running_instances, pending_instances = self.get_running_instances()
+            if len(running_instances) >= 2:
+                logging.info(f"[Instance] Already have {len(running_instances)} running instances, skipping new instance creation")
+                return None
+                
+            if len(pending_instances) > 0:
+                logging.info(f"[Instance] Waiting for {len(pending_instances)} pending instances to start")
+                for instance_id in pending_instances:
+                    if self.wait_for_instance_running(instance_id):
+                        running_instances.append(instance_id)
+                        pending_instances.remove(instance_id)
+                
+                if len(running_instances) >= 2:
+                    logging.info("[Instance] Enough instances are now running")
+                    return None
+            
+            # Only start new instance if we still need one
+            if len(running_instances) + len(pending_instances) < 2:
+                ec2 = boto3.client('ec2', region_name=self.region_name)
+                # Get the latest AMI ID for our crawler
+                response = ec2.describe_images(
+                    Filters=[
+                        {
+                            'Name': 'name',
+                            'Values': ['crawler-ami-*']
+                        }
+                    ]
+                )
+                
+                if not response['Images']:
+                    logging.error("[Instance] No crawler AMI found!")
+                    return None
+                    
+                # Sort by creation date and get the latest
+                latest_ami = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)[0]
+                ami_id = latest_ami['ImageId']
+                
+                # Launch instance from AMI
+                response = ec2.run_instances(
+                    ImageId=ami_id,
+                    InstanceType='t2.micro',
+                    MinCount=1,
+                    MaxCount=1,
+                    TagSpecifications=[
+                        {
+                            'ResourceType': 'instance',
+                            'Tags': [
+                                {
+                                    'Key': 'Name',
+                                    'Value': 'CrawlerNode'
+                                }
+                            ]
+                        }
+                    ],
+                    UserData='''#!/bin/bash
+                    cd /home/ubuntu
+                    # Activate virtual environment
+                    source crawler-venv/bin/activate
+                    # Set environment variables
+                    export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
+                    export MASTER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue"
+                    export INDEXER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/IndexQueue"
+                    export S3_BUCKET="crawler-indexer-buckets"
+                    export DYNAMODB_TABLE="CrawlerHeartbeatTable"
+                    export AWS_REGION="us-east-1"
+                    export CRAWLER_DELAY="10"
+                    # Run the crawler
+                    python crawler_object.py
+                    '''
+                )
+                
+                instance_id = response['Instances'][0]['InstanceId']
+                logging.info(f"[Instance] Starting new crawler node with instance ID: {instance_id}")
+                
+                # Wait for instance to be fully ready
+                if self.wait_for_instance_running(instance_id):
+                    logging.info(f"[Instance] New crawler node {instance_id} is ready")
+                    return instance_id
+                else:
+                    logging.error(f"[Instance] Failed to start crawler node {instance_id}")
+                    return None
+                    
+        except Exception as e:
+            logging.error(f"[Instance] Failed to start backup crawler: {str(e)}")
+            return None
 
     def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
@@ -607,6 +970,53 @@ class MasterNode:
         response = self.blocked_table.get_item(Key={'url': url})
         return 'Item' in response
 
+    def get_crawler_pool(self):
+        """Get list of all crawler nodes (running and shutdown)"""
+        try:
+            response = self.heartbeat_table.scan()
+            crawlers = {
+                'running': [],
+                'shutdown': []
+            }
+            
+            for item in response['Items']:
+                crawler_id = item['crawler_id']
+                status = item.get('status', 'unknown')
+                
+                if status == 'running':
+                    crawlers['running'].append(crawler_id)
+                elif status == 'shutdown':
+                    crawlers['shutdown'].append(crawler_id)
+            
+            return crawlers
+            
+        except Exception as e:
+            logging.error(f"[Crawler] Error getting crawler pool: {str(e)}")
+            return {'running': [], 'shutdown': []}
+
+    def calculate_desired_crawlers(self, num_messages):
+        """Calculate the desired number of crawlers based on queue size"""
+        # Base calculation: 1 crawler per 10 URLs, minimum 2
+        base_crawlers = max(2, num_messages // 10 + 1)
+        
+        # Get current crawler pool
+        crawler_pool = self.get_crawler_pool()
+        num_running = len(crawler_pool['running'])
+        num_shutdown = len(crawler_pool['shutdown'])
+        
+        # If we have too many shutdown crawlers (>4), reduce the number
+        if num_shutdown > 4:
+            excess_shutdown = num_shutdown - 4
+            for crawler_id in crawler_pool['shutdown'][:excess_shutdown]:
+                try:
+                    ec2 = boto3.client('ec2', region_name=self.region_name)
+                    ec2.terminate_instances(InstanceIds=[crawler_id])
+                    logging.info(f"[Scaling] Terminated excess shutdown crawler {crawler_id}")
+                except Exception as e:
+                    logging.error(f"[Scaling] Failed to terminate crawler {crawler_id}: {str(e)}")
+        
+        return base_crawlers
+
     def run_all_monitoring_tasks(self):
         """Run all monitoring tasks in sequence"""
         logging.info("[Master] Starting comprehensive monitoring cycle")
@@ -625,7 +1035,7 @@ class MasterNode:
         # Monitor task timeouts
         self.monitor_task_timeouts()
         
-        # Monitor crawl queue status
+        # Monitor crawl queue status and scale crawlers
         response = self.sqs.get_queue_attributes(
             QueueUrl=self.crawl_queue_url,
             AttributeNames=['ApproximateNumberOfMessages']
@@ -633,67 +1043,48 @@ class MasterNode:
         num_messages = int(response['Attributes']['ApproximateNumberOfMessages'])
         logging.info(f"[Monitor] Remaining URLs in queue: {num_messages}")
         
-        # If queue is empty, perform completion tasks
-        if num_messages == 0:
-            logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
-
-        else:
-            # Dynamic scaling logic
-            active_crawlers = self.count_active_crawlers()
-            min_crawlers = 2
-            desired_crawlers = max(min_crawlers, min(num_messages // 10 + 1, 10))
-
-            if active_crawlers < desired_crawlers:
-                num_to_start = desired_crawlers - active_crawlers
-                self.ensure_crawlers(num_to_start)
-            elif active_crawlers > desired_crawlers:
-                response = self.heartbeat_table.scan()
-                running_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'running']
-                # Shut down excess crawlers, but keep at least min_crawlers
-                for crawler_id in running_crawlers[desired_crawlers:]:
-                    self.send_shutdown_signal_to_crawler(crawler_id)
-                logging.info(f"[Scaling] Sent shutdown to {active_crawlers - desired_crawlers} crawlers (active: {active_crawlers} -> {desired_crawlers})")
-            else:
-                logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
-
-      
-    def count_active_crawlers(self):
-        """Return the number of crawlers with status 'running'."""
-        response = self.heartbeat_table.scan()
-        return sum(1 for item in response['Items'] if item.get('status') == 'running')
-
-    def send_shutdown_signal_to_crawler(self, crawler_id):
-        # Check if crawler is already in shutdown state
-        response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_id})
-        if 'Item' in response and response['Item'].get('status') == 'shutdown':
-            logging.info(f"[Master] Crawler {crawler_id} is already in shutdown state.")
-            return
-
-        shutdown_message = {
-            "shutdown": True,
-            "crawler_id": crawler_id
-        }
-        self.sqs.send_message(
-            QueueUrl=self.crawl_queue_url,
-            MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
-        )
-        logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
-
-    def ensure_crawlers(self, num_to_start):
-        """Wake up shutdown crawlers if available, otherwise start new ones."""
-        response = self.heartbeat_table.scan()
-        shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
-        num_woken = 0
+        # Get current crawler pool
+        crawler_pool = self.get_crawler_pool()
+        num_running = len(crawler_pool['running'])
+        num_shutdown = len(crawler_pool['shutdown'])
         
-        for crawler_id in shutdown_crawlers[:num_to_start]:
-            self.wake_up_crawler(crawler_id)
-            num_woken += 1
+        # Calculate desired number of crawlers
+        desired_crawlers = self.calculate_desired_crawlers(num_messages)
+        
+        if num_running < desired_crawlers:
+            # Need more crawlers
+            num_to_start = desired_crawlers - num_running
             
-        num_to_start_new = num_to_start - num_woken
-        for _ in range(num_to_start_new):
-            self.start_backup_crawler()
+            # First try to wake up shutdown crawlers
+            num_to_wake = min(num_to_start, num_shutdown)
+            for crawler_id in crawler_pool['shutdown'][:num_to_wake]:
+                self.wake_up_crawler(crawler_id)
+                num_running += 1
             
-        logging.info(f"[Scaling] Woke up {num_woken} shutdown crawlers, started {num_to_start_new} new crawlers.")
+            # If we still need more, start new ones
+            if num_running < desired_crawlers:
+                num_to_create = desired_crawlers - num_running
+                for _ in range(num_to_create):
+                    self.start_backup_crawler()
+            
+            logging.info(f"[Scaling] Scaled up to {desired_crawlers} crawlers (woke up {num_to_wake}, created {num_to_create})")
+            
+        elif num_running > desired_crawlers:
+            # Too many running crawlers
+            excess = num_running - desired_crawlers
+            
+            # Put excess crawlers into shutdown state, but maintain minimum of 2 running
+            num_to_shutdown = min(excess, num_running - 2)
+            for crawler_id in crawler_pool['running'][:num_to_shutdown]:
+                self.send_shutdown_signal_to_crawler(crawler_id)
+            
+            logging.info(f"[Scaling] Put {num_to_shutdown} crawlers into shutdown state (now {num_running - num_to_shutdown} running)")
+            
+        else:
+            logging.info(f"[Scaling] No scaling needed. Running crawlers: {num_running}, Desired: {desired_crawlers}")
+        
+        # Print dashboard at the end of the monitoring cycle
+        self.print_dashboard()
 
     def print_crawl_quality_metrics(self):
         scanned = self.task_table.scan()
@@ -947,44 +1338,12 @@ class MasterNode:
             self.last_indexed_time = time.time()
             self.running = False
             
-            # Handle EC2 instances
-            ec2 = boto3.client('ec2', region_name=self.region_name)
-            response = ec2.describe_instances(
-                Filters=[
-                    {
-                        'Name': 'tag:Name',
-                        'Values': ['CrawlerNode']
-                    },
-                    {
-                        'Name': 'instance-state-name',
-                        'Values': ['running', 'pending', 'stopping', 'stopped']
-                    }
-                ]
-            )
+            # Initialize crawler pool (2 crawlers, one in shutdown)
+            if not self.initialize_crawler_pool():
+                raise Exception("Failed to initialize crawler pool")
             
-            instance_ids = []
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    instance_ids.append(instance['InstanceId'])
+            logging.info("[Reset] System state reset complete")
             
-            if instance_ids:
-                ec2.terminate_instances(InstanceIds=instance_ids)
-                logging.info(f"[Reset] Terminated {len(instance_ids)} instances")
-                # Wait for instances to terminate
-                time.sleep(10)
-            
-            # Start fresh crawlers
-            for _ in range(2):
-                self.start_backup_crawler()
-            logging.info("[Reset] Started 2 initial crawlers")
-            
-            # Wait for crawlers to be running
-            time.sleep(30)
-            
-            # Verify cleanup
-            self.verify_cleanup()
-            
-            logging.info("[Master] System state reset complete")
         except Exception as e:
             logging.error(f"[Reset] Error during system reset: {str(e)}")
             raise
@@ -1012,11 +1371,11 @@ if __name__ == "__main__":
         indexer_heartbeat_table_name = 'IndexerHeartbeatTable',
         max_depth=2)
 
-    # Reset system state before starting (now includes rebooting instances)
+    # Reset system state and initialize crawler pool
     master.reset_system_state()
     
-    # Wait a moment to ensure all cleanup and reboots are complete
-    time.sleep(10)  # Increased wait time to account for reboots
+    # Wait a moment to ensure crawler pool is ready
+    time.sleep(10)
     
     logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
