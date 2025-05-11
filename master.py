@@ -976,7 +976,7 @@ class MasterNode:
                                 batch.delete_item(Key={'url': item['url']})
                             elif table_name == 'blocked':
                                 batch.delete_item(Key={'url': item['url']})
-        except Exception as e:
+            except Exception as e:
                 logging.error(f"[Verify] Failed to check table {table_name}: {str(e)}")
 
         # Check EC2 instances
@@ -1133,7 +1133,7 @@ if __name__ == "__main__":
     
     # Wait a moment to ensure all cleanup is complete
     time.sleep(5)
-
+    
     logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
-    ####
+    ####s
