@@ -20,7 +20,7 @@ class Crawler:
                  s3_bucket,
                  dynamodb_table,
                  region='us-east-1',
-                 delay=1    # Politeness logic
+                 delay=10  # Politeness logic
                  ):
 
         # Initialization of crawler node.
