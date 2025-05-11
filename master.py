@@ -202,29 +202,7 @@ class MasterNode:
                         MessageBody=json.dumps(body)
                     )
                     logging.info(f"[Request] Forwarded crawl request to crawl queue: {body}")
-                elif msg_type == 'monitoring_request':
-                    # Collect monitoring data
-                    monitoring_data = {
-                        'active_crawlers': self.count_active_crawlers(),
-                        'crawled_urls': self.count_crawled_urls(),
-                        'crawl_rate': self.get_crawl_rate(),
-                        'indexing_rate': self.get_indexing_rate(),
-                        'error_rates': self.get_error_rates(),
-                        'crawler_status': self.get_crawler_status(),
-                        'queue_status': self.get_queue_status()
-                    }
-                    
-                    # Send monitoring data back to client
-                    response_message = {
-                        'type': 'monitoring_data',
-                        'client_id': client_id,
-                        'data': monitoring_data
-                    }
-                    self.sqs.send_message(
-                        QueueUrl=self.ResponseQueue,
-                        MessageBody=json.dumps(response_message)
-                    )
-                    logging.info(f"[Request] Sent monitoring data to client {client_id}")
+
 
                 self.sqs.delete_message(
                     QueueUrl=self.request_queue_url,
@@ -265,9 +243,10 @@ class MasterNode:
                 status = body.get('status')
                 error = body.get('error', '')
                 timestamp = body.get('timestamp')
+                client_id = body.get('client_id', None)
 
                 if status == "search_success":
-                    self.forward_search_result_to_client(msg_content)
+                    self.forward_search_result_to_client(msg_content, client_id)
                     item = {
                         'url': json.loads(msg_content).get('url', 'unknown'),
                         'status': status,
@@ -291,16 +270,22 @@ class MasterNode:
                     ReceiptHandle=message['ReceiptHandle']
                 )
     
-    def forward_search_result_to_client(self, result_json_str):
+    def forward_search_result_to_client(self, result_json_str, client_id):
         try:
             result_json = json.loads(result_json_str)
+            # Add client_id to the response
+            response_message = {        
+                'client_id': client_id,
+                'result': result_json
+            }
             self.sqs.send_message(
                 QueueUrl=self.ResponseQueue,
-                MessageBody=json.dumps(result_json)
+                MessageBody=json.dumps(response_message)
             )
-            logging.info(f"[Forwarded] Search result sent to client queue: {result_json}")
+            logging.info(f"[Forwarded] Search result sent to client queue for client {client_id}: {result_json}")
         except json.JSONDecodeError:
             logging.error(f"[Forwarded] Failed to decode result_json: {result_json_str}")
+
 
     def compute_index_search_error_rates(self):
         response = self.index_status_table.scan()
@@ -314,18 +299,15 @@ class MasterNode:
         total_index = index_success + index_failed
         total_search = search_success + search_failed
 
-        if total_index > 0:
-            print(f"Indexing Error Rate: {(index_failed / total_index) * 100:.2f}%")
-        else:
-            print("Indexing Error Rate: 0.00%")
+        index_error_rate = (index_failed / total_index * 100) if total_index > 0 else 0
+        search_error_rate = (search_failed / total_search * 100) if total_search > 0 else 0
 
-        if total_search > 0:
-            print(f"Search Error Rate: {(search_failed / total_search) * 100:.2f}%")
-        else:
-            print("Search Error Rate: 0.00%")
+        return {
+            "index_error_rate": index_error_rate,
+            "search_error_rate": search_error_rate,
+            "total_indexed": index_success
+        }
 
-        print(f"Total Indexed URLs: {index_success}")
-    
     def monitor_crawl_queue(self):
         """Main monitoring loop that runs all monitoring tasks periodically"""
         self.running = True
@@ -412,11 +394,6 @@ class MasterNode:
         except Exception as e:
             logging.error(f"[Recovery] Failed to start backup crawler: {e}")
 
-    def count_crawled_urls(self):
-        scanned = self.task_table.scan()
-        done = sum(1 for item in scanned['Items'] if item['status'] == 'done')
-        logging.info(f"Total URLs crawled successfully: {done}")
-        print(f"Total URLs crawled successfully: {done}")
 
     def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
@@ -617,9 +594,7 @@ class MasterNode:
         if num_messages == 0:
             logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
             self.send_shutdown_signal_to_crawlers()
-            self.count_crawled_urls()
-            self.print_crawl_quality_metrics()
-            self.compute_index_search_error_rates()
+
         else:
             # Dynamic scaling logic
             active_crawlers = self.count_active_crawlers()
@@ -680,16 +655,25 @@ class MasterNode:
         coverage = (crawled / total) * 100 if total > 0 else 0
         error_rate = (failed / total) * 100 if total > 0 else 0
 
-        print(f"Crawl Coverage: {coverage:.2f}% ({crawled}/{total})")
-        print(f"Error rate: {error_rate:.2f}% (Failed: {failed}, Total: {total})")
-        print(f"Politeness: URLs skipped due to robots.txt: {skipped}")
+        return {
+            "crawl_coverage": coverage,
+            "crawled": crawled,
+            "total_tasks": total,
+            "crawl_error_rate": error_rate,
+            "crawl_failed": failed,
+            "politeness": skipped
+        }
 
     def print_crawler_node_status(self):
         response = self.heartbeat_table.scan()
         active = sum(1 for item in response['Items'] if item.get('status') == 'running')
         failed = sum(1 for item in response['Items'] if item.get('status') == 'failed')
         shutdown = sum(1 for item in response['Items'] if item.get('status') == 'shutdown')
-        print(f"Crawler Nodes - Active: {active}, Failed: {failed}, Shutdown: {shutdown}")
+        return {
+            "active": active,
+            "failed": failed,
+            "shutdown": shutdown
+        }
 
     def print_crawl_rate(self):
         scanned = self.task_table.scan()
@@ -698,9 +682,10 @@ class MasterNode:
         elapsed = now - self.last_crawl_time
         if elapsed > 0:
             rate = (crawled - self.last_crawl_count) / elapsed
-            print(f"Crawl rate: {rate:.2f} URLs/sec")
-        self.last_crawl_count = crawled
-        self.last_crawl_time = now
+            self.last_crawl_count = crawled
+            self.last_crawl_time = now
+            return {"crawl_rate": rate}
+        return {"crawl_rate": 0.0}
 
     def print_indexing_rate(self):
         response = self.index_status_table.scan()
@@ -709,20 +694,32 @@ class MasterNode:
         elapsed = now - self.last_indexed_time
         if elapsed > 0:
             rate = (indexed - self.last_indexed_count) / elapsed
-            print(f"Indexing rate: {rate:.2f} URLs/sec")
-        self.last_indexed_count = indexed
-        self.last_indexed_time = now
+            self.last_indexed_count = indexed
+            self.last_indexed_time = now
+            return {"indexing_rate": rate}
+        return {"indexing_rate": 0.0}
 
     def print_dashboard(self):
-        print("==== Monitoring Dashboard ====")
-        self.count_crawled_urls()
-        self.compute_index_search_error_rates()
-        self.print_crawl_quality_metrics()
-        self.print_crawler_node_status()
-        self.print_crawl_rate()
-        self.print_indexing_rate()
-        print("=============================")
+        """Collect all metrics and send them through the queue"""
+        # Collect all metrics
+        metrics = {}
+        metrics.update(self.compute_index_search_error_rates())
+        metrics.update(self.print_crawl_quality_metrics())
+        metrics.update(self.print_crawler_node_status())
+        metrics.update(self.print_crawl_rate())
+        metrics.update(self.print_indexing_rate())
         
+        try:
+            self.sqs.send_message(
+                QueueUrl=self.ResponseQueue,
+                MessageBody=json.dumps({
+                    'feedback': metrics
+                })
+            )
+            logging.info("[Dashboard] Sent metrics to queue")
+        except Exception as e:
+            logging.error(f"[Dashboard] Failed to send metrics: {str(e)}")
+
     def shutdown(self):
         """Handle graceful shutdown of the master node"""
         logging.info("[Master] Initiating graceful shutdown...")
