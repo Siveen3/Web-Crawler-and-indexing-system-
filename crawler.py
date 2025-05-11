@@ -312,11 +312,9 @@ class Crawler:
                     else:
                         logging.error(f"Failed to upload content to S3 for URL: {url}")
                         self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to upload to S3")
-                        continue
                 else:
                     logging.error(f"Failed to fetch URL: {url}")
                     self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to fetch")
-                    continue
 
             # Delete the processed message from queue
             try:
