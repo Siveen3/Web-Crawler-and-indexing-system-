@@ -344,8 +344,10 @@ class MasterNode:
             node_id = item[f'{node_type}_id']
             last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
             time_diff = (now - last_heartbeat).total_seconds()
+            status = item.get('status', 'unknown')
             
-            if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
+            # Don't mark as failed if in recovery or already failed/shutdown
+            if time_diff > 120 and status not in ['failed', 'shutdown', 'recovering']:
                 logging.warning(f"[Warning] {node_id} missed heartbeat! Declaring as failed.")
                 table.update_item(
                     Key={f'{node_type}_id': node_id},
@@ -355,8 +357,18 @@ class MasterNode:
                 )
                 if node_type == 'crawler':
                     self.handle_failed_crawler(item)
+            elif status == 'recovering' and time_diff > 300:  # 5 minutes recovery timeout
+                logging.warning(f"[Warning] {node_id} recovery timeout! Declaring as failed.")
+                table.update_item(
+                    Key={f'{node_type}_id': node_id},
+                    UpdateExpression="SET #s = :s",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":s": "failed"}
+                )
+                if node_type == 'crawler':
+                    self.handle_failed_crawler(item)
             else:
-                logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago).")
+                logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago). Status: {status}")
 
     def monitor_crawlers_health(self):
         """Monitor the health of crawler nodes"""
@@ -368,6 +380,8 @@ class MasterNode:
 
     def handle_failed_crawler(self, crawler_item):
         failed_task_url = crawler_item.get('current_task_url')
+        crawler_id = crawler_item.get('crawler_id')
+        
         if failed_task_url:
             # Check if the task is still pending and not already failed/timed out
             task = self.task_table.get_item(Key={'url': failed_task_url}).get('Item')
@@ -379,8 +393,53 @@ class MasterNode:
                     UpdateExpression="SET assigned_at = :t",
                     ExpressionAttributeValues={":t": now.isoformat()}
                 )
-                logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_item['crawler_id']}")
+                logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_id}")
 
+        try:
+            # Try to reboot the failed instance
+            ec2 = boto3.client('ec2', region_name=self.region_name)
+            # Find instance by tag and crawler ID
+            response = ec2.describe_instances(
+                Filters=[
+                    {
+                        'Name': 'tag:Name',
+                        'Values': ['CrawlerNode']
+                    },
+                    {
+                        'Name': 'instance-state-name',
+                        'Values': ['running', 'pending', 'stopping', 'stopped']
+                    }
+                ]
+            )
+            
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    instance_id = instance['InstanceId']
+                    # Try to reboot the instance
+                    try:
+                        ec2.reboot_instances(InstanceIds=[instance_id])
+                        logging.info(f"[Recovery] Attempting to reboot failed instance {instance_id} for crawler {crawler_id}")
+                        
+                        # Update heartbeat table to mark as recovering
+                        self.heartbeat_table.update_item(
+                            Key={'crawler_id': crawler_id},
+                            UpdateExpression="SET #s = :s, last_heartbeat = :t",
+                            ExpressionAttributeNames={"#s": "status"},
+                            ExpressionAttributeValues={
+                                ":s": "recovering",
+                                ":t": datetime.now(timezone.utc).isoformat()
+                            }
+                        )
+                        return
+                    except Exception as e:
+                        logging.error(f"[Recovery] Failed to reboot instance {instance_id}: {str(e)}")
+                        # If reboot fails, continue to normal recovery process
+                        break
+                break
+        except Exception as e:
+            logging.error(f"[Recovery] Error in instance recovery process: {str(e)}")
+
+        # If reboot fails or no instance found, proceed with normal recovery
         # Check for shutdown crawlers
         response = self.heartbeat_table.scan()
         shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
@@ -669,6 +728,7 @@ class MasterNode:
             logging.info(f"[Master] Crawler {crawler_id} is already in shutdown state.")
             return
 
+        # First send shutdown signal to crawler
         shutdown_message = {
             "shutdown": True,
             "crawler_id": crawler_id
@@ -678,6 +738,35 @@ class MasterNode:
             MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
         )
         logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
+
+        # Then terminate the EC2 instance
+        try:
+            ec2 = boto3.client('ec2', region_name=self.region_name)
+            # Find instance by tag
+            response = ec2.describe_instances(
+                Filters=[
+                    {
+                        'Name': 'tag:Name',
+                        'Values': ['CrawlerNode']
+                    },
+                    {
+                        'Name': 'instance-state-name',
+                        'Values': ['running', 'pending']
+                    }
+                ]
+            )
+            
+            # Get the first running instance
+            for reservation in response['Reservations']:
+                for instance in reservation['Instances']:
+                    instance_id = instance['InstanceId']
+                    # Terminate the instance
+                    ec2.terminate_instances(InstanceIds=[instance_id])
+                    logging.info(f"[Master] Terminated EC2 instance {instance_id} for crawler {crawler_id}")
+                    break
+                break
+        except Exception as e:
+            logging.error(f"[Master] Failed to terminate EC2 instance for crawler {crawler_id}: {str(e)}")
 
     def ensure_crawlers(self, num_to_start):
         """Wake up shutdown crawlers if available, otherwise start new ones."""
