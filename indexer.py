@@ -191,7 +191,7 @@ class Indexer:
         formatted = []
         for hit in results['hits']['hits']:
             source = hit['_source']
-            formatted.({
+            formatted.append({
                 "client_id": client_id,
                 "url": hit["_id"],
                 "title": source.get("title", ""),
@@ -210,7 +210,8 @@ class Indexer:
             "status": status,
             "error": error,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "client_id": client_id
+            "client_id": client_id,
+            "query": query
         }
                     
         try:
