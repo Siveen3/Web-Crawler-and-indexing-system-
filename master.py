@@ -273,7 +273,7 @@ class MasterNode:
         try:
             # Handle both string and list results
             if isinstance(result_json_str, str):
-            result_json = json.loads(result_json_str)
+                result_json = json.loads(result_json_str)
             else:
                 result_json = result_json_str  # Already a Python object (list/dict)
                 
@@ -344,10 +344,8 @@ class MasterNode:
             node_id = item[f'{node_type}_id']
             last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
             time_diff = (now - last_heartbeat).total_seconds()
-            status = item.get('status', 'unknown')
             
-            # Don't mark as failed if in recovery or already failed/shutdown
-            if time_diff > 120 and status not in ['failed', 'shutdown', 'recovering']:
+            if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
                 logging.warning(f"[Warning] {node_id} missed heartbeat! Declaring as failed.")
                 table.update_item(
                     Key={f'{node_type}_id': node_id},
@@ -357,18 +355,8 @@ class MasterNode:
                 )
                 if node_type == 'crawler':
                     self.handle_failed_crawler(item)
-            elif status == 'recovering' and time_diff > 300:  # 5 minutes recovery timeout
-                logging.warning(f"[Warning] {node_id} recovery timeout! Declaring as failed.")
-                table.update_item(
-                    Key={f'{node_type}_id': node_id},
-                    UpdateExpression="SET #s = :s",
-                    ExpressionAttributeNames={"#s": "status"},
-                    ExpressionAttributeValues={":s": "failed"}
-                )
-                if node_type == 'crawler':
-                self.handle_failed_crawler(item)
             else:
-                logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago). Status: {status}")
+                logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago).")
 
     def monitor_crawlers_health(self):
         """Monitor the health of crawler nodes"""
@@ -380,8 +368,6 @@ class MasterNode:
 
     def handle_failed_crawler(self, crawler_item):
         failed_task_url = crawler_item.get('current_task_url')
-        crawler_id = crawler_item.get('crawler_id')
-        
         if failed_task_url:
             # Check if the task is still pending and not already failed/timed out
             task = self.task_table.get_item(Key={'url': failed_task_url}).get('Item')
@@ -393,53 +379,8 @@ class MasterNode:
                     UpdateExpression="SET assigned_at = :t",
                     ExpressionAttributeValues={":t": now.isoformat()}
                 )
-                logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_id}")
+                logging.info(f"[Recovery] Updated timestamp for task {failed_task_url} from failed crawler {crawler_item['crawler_id']}")
 
-        try:
-            # Try to reboot the failed instance
-            ec2 = boto3.client('ec2', region_name=self.region_name)
-            # Find instance by tag and crawler ID
-            response = ec2.describe_instances(
-                Filters=[
-                    {
-                        'Name': 'tag:Name',
-                        'Values': ['CrawlerNode']
-                    },
-                    {
-                        'Name': 'instance-state-name',
-                        'Values': ['running', 'pending', 'stopping', 'stopped']
-                    }
-                ]
-            )
-            
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    instance_id = instance['InstanceId']
-                    # Try to reboot the instance
-                    try:
-                        ec2.reboot_instances(InstanceIds=[instance_id])
-                        logging.info(f"[Recovery] Attempting to reboot failed instance {instance_id} for crawler {crawler_id}")
-                        
-                        # Update heartbeat table to mark as recovering
-                        self.heartbeat_table.update_item(
-                            Key={'crawler_id': crawler_id},
-                            UpdateExpression="SET #s = :s, last_heartbeat = :t",
-                            ExpressionAttributeNames={"#s": "status"},
-                            ExpressionAttributeValues={
-                                ":s": "recovering",
-                                ":t": datetime.now(timezone.utc).isoformat()
-                            }
-                        )
-                        return
-                    except Exception as e:
-                        logging.error(f"[Recovery] Failed to reboot instance {instance_id}: {str(e)}")
-                        # If reboot fails, continue to normal recovery process
-                        break
-                break
-        except Exception as e:
-            logging.error(f"[Recovery] Error in instance recovery process: {str(e)}")
-
-        # If reboot fails or no instance found, proceed with normal recovery
         # Check for shutdown crawlers
         response = self.heartbeat_table.scan()
         shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
@@ -695,32 +636,6 @@ class MasterNode:
         # If queue is empty, perform completion tasks
         if num_messages == 0:
             logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
-            # Terminate all running instances when queue is empty
-            try:
-                ec2 = boto3.client('ec2', region_name=self.region_name)
-                response = ec2.describe_instances(
-                    Filters=[
-                        {
-                            'Name': 'tag:Name',
-                            'Values': ['CrawlerNode']
-                        },
-                        {
-                            'Name': 'instance-state-name',
-                            'Values': ['running', 'pending']
-                        }
-                    ]
-                )
-                
-                instance_ids = []
-                for reservation in response['Reservations']:
-                    for instance in reservation['Instances']:
-                        instance_ids.append(instance['InstanceId'])
-                
-                if instance_ids:
-                    ec2.terminate_instances(InstanceIds=instance_ids)
-                    logging.info(f"[Scaling] Terminated {len(instance_ids)} instances due to empty queue")
-            except Exception as e:
-                logging.error(f"[Scaling] Failed to terminate instances: {str(e)}")
 
         else:
             # Dynamic scaling logic
@@ -732,51 +647,16 @@ class MasterNode:
                 num_to_start = desired_crawlers - active_crawlers
                 self.ensure_crawlers(num_to_start)
             elif active_crawlers > desired_crawlers:
-                # Get list of running instances
-                try:
-                    ec2 = boto3.client('ec2', region_name=self.region_name)
-                    response = ec2.describe_instances(
-                        Filters=[
-                            {
-                                'Name': 'tag:Name',
-                                'Values': ['CrawlerNode']
-                            },
-                            {
-                                'Name': 'instance-state-name',
-                                'Values': ['running', 'pending']
-                            }
-                        ]
-                    )
-                    
-                    # Get instance IDs to terminate
-                    instance_ids = []
-                    for reservation in response['Reservations']:
-                        for instance in reservation['Instances']:
-                            instance_ids.append(instance['InstanceId'])
-                    
-                    # Keep only the desired number of instances
-                    instances_to_terminate = instance_ids[desired_crawlers:]
-                    if instances_to_terminate:
-                        ec2.terminate_instances(InstanceIds=instances_to_terminate)
-                        logging.info(f"[Scaling] Terminated {len(instances_to_terminate)} excess instances (active: {active_crawlers} -> {desired_crawlers})")
-                        
-                        # Update heartbeat table for terminated instances
-                        for crawler_id in self.heartbeat_table.scan()['Items']:
-                            if crawler_id.get('status') == 'running':
-                                self.heartbeat_table.update_item(
-                                    Key={'crawler_id': crawler_id['crawler_id']},
-                                    UpdateExpression="SET #s = :s",
-                                    ExpressionAttributeNames={"#s": "status"},
-                                    ExpressionAttributeValues={":s": "shutdown"}
-                                )
-                except Exception as e:
-                    logging.error(f"[Scaling] Failed to terminate excess instances: {str(e)}")
+                response = self.heartbeat_table.scan()
+                running_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'running']
+                # Shut down excess crawlers, but keep at least min_crawlers
+                for crawler_id in running_crawlers[desired_crawlers:]:
+                    self.send_shutdown_signal_to_crawler(crawler_id)
+                logging.info(f"[Scaling] Sent shutdown to {active_crawlers - desired_crawlers} crawlers (active: {active_crawlers} -> {desired_crawlers})")
             else:
                 logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
 
-        # Print dashboard at the end of the monitoring cycle
-        self.print_dashboard()
-
+      
     def count_active_crawlers(self):
         """Return the number of crawlers with status 'running'."""
         response = self.heartbeat_table.scan()
@@ -789,7 +669,6 @@ class MasterNode:
             logging.info(f"[Master] Crawler {crawler_id} is already in shutdown state.")
             return
 
-        # First send shutdown signal to crawler
         shutdown_message = {
             "shutdown": True,
             "crawler_id": crawler_id
@@ -799,35 +678,6 @@ class MasterNode:
             MessageBody=json.dumps(shutdown_message, cls=DecimalEncoder)
         )
         logging.info(f"[Master] Sent shutdown signal to {crawler_id}")
-
-        # Then terminate the EC2 instance
-        try:
-            ec2 = boto3.client('ec2', region_name=self.region_name)
-            # Find instance by tag
-            response = ec2.describe_instances(
-                Filters=[
-                    {
-                        'Name': 'tag:Name',
-                        'Values': ['CrawlerNode']
-                    },
-                    {
-                        'Name': 'instance-state-name',
-                        'Values': ['running', 'pending']
-                    }
-                ]
-            )
-            
-            # Get the first running instance
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    instance_id = instance['InstanceId']
-                    # Terminate the instance
-                    ec2.terminate_instances(InstanceIds=[instance_id])
-                    logging.info(f"[Master] Terminated EC2 instance {instance_id} for crawler {crawler_id}")
-                    break
-                break
-        except Exception as e:
-            logging.error(f"[Master] Failed to terminate EC2 instance for crawler {crawler_id}: {str(e)}")
 
     def ensure_crawlers(self, num_to_start):
         """Wake up shutdown crawlers if available, otherwise start new ones."""
@@ -919,69 +769,28 @@ class MasterNode:
         except Exception as e:
             logging.error(f"[Dashboard] Failed to send metrics: {str(e)}")
 
-    def verify_cleanup(self):
-        """Verify that all resources are properly cleaned up"""
-        logging.info("[Verify] Checking cleanup status...")
-        
-        # Check SQS queues
-        queue_urls = [
-            self.crawl_queue_url,
-            self.report_queue_url,
-            self.request_queue_url,
-            self.ResponseQueue,
-            self.search_queue_url,
-            self.index_feedback_queue_url,
-            self.dead_letter_queue_url
-        ]
-        
-        for queue_url in queue_urls:
-            try:
-                response = self.sqs.get_queue_attributes(
-                    QueueUrl=queue_url,
-                    AttributeNames=['ApproximateNumberOfMessages', 'ApproximateNumberOfMessagesNotVisible']
-                )
-                visible = int(response['Attributes']['ApproximateNumberOfMessages'])
-                not_visible = int(response['Attributes']['ApproximateNumberOfMessagesNotVisible'])
-                if visible > 0 or not_visible > 0:
-                    logging.warning(f"[Verify] Queue {queue_url} still has messages: {visible} visible, {not_visible} not visible")
-                    # Try to purge again
-                    self.sqs.purge_queue(QueueUrl=queue_url)
-            except Exception as e:
-                logging.error(f"[Verify] Failed to check queue {queue_url}: {str(e)}")
+    def shutdown(self):
+        """Handle graceful shutdown of the master node"""
+        logging.info("[Master] Initiating graceful shutdown...")
+        self.running = False
+        try:
+            # Send shutdown signals to all crawlers
+            self.send_shutdown_signal_to_crawlers()
+            
+            # Print final statistics
+            self.print_dashboard()
+            
+            logging.info("[Master] Shutdown complete")
+        except Exception as e:
+            logging.error(f"[Master] Error during shutdown: {str(e)}")
+            raise
 
-        # Check DynamoDB tables
-        tables = {
-            'heartbeat': self.heartbeat_table,
-            'indexer_heartbeat': self.indexer_heartbeat_table,
-            'task': self.task_table,
-            'index_status': self.index_status_table,
-            'blocked': self.blocked_table
-        }
-
-        for table_name, table in tables.items():
-            try:
-                response = table.scan()
-                if response.get('Items'):
-                    logging.warning(f"[Verify] Table {table_name} still has {len(response['Items'])} items")
-                    # Try to clear again
-                    with table.batch_writer() as batch:
-                        for item in response['Items']:
-                            if table_name == 'heartbeat':
-                                batch.delete_item(Key={'crawler_id': item['crawler_id']})
-                            elif table_name == 'indexer_heartbeat':
-                                batch.delete_item(Key={'indexer_id': item['indexer_id']})
-                            elif table_name == 'task':
-                                batch.delete_item(Key={'url': item['url']})
-                            elif table_name == 'index_status':
-                                batch.delete_item(Key={'url': item['url']})
-                            elif table_name == 'blocked':
-                                batch.delete_item(Key={'url': item['url']})
-            except Exception as e:
-                logging.error(f"[Verify] Failed to check table {table_name}: {str(e)}")
-
-        # Check EC2 instances
+    def reboot_all_instances(self):
+        """Reboot all running crawler instances"""
+        logging.info("[Reboot] Attempting to reboot all crawler instances...")
         try:
             ec2 = boto3.client('ec2', region_name=self.region_name)
+            # Find all instances with CrawlerNode tag
             response = ec2.describe_instances(
                 Filters=[
                     {
@@ -1001,16 +810,144 @@ class MasterNode:
                     instance_ids.append(instance['InstanceId'])
             
             if instance_ids:
-                logging.warning(f"[Verify] Found {len(instance_ids)} instances still running/stopping")
-                ec2.terminate_instances(InstanceIds=instance_ids)
+                # First try to reboot running instances
+                running_instances = []
+                for instance_id in instance_ids:
+                    try:
+                        ec2.reboot_instances(InstanceIds=[instance_id])
+                        running_instances.append(instance_id)
+                        logging.info(f"[Reboot] Reboot initiated for instance {instance_id}")
+                    except Exception as e:
+                        logging.error(f"[Reboot] Failed to reboot instance {instance_id}: {str(e)}")
+                
+                if running_instances:
+                    # Wait for instances to reboot
+                    logging.info(f"[Reboot] Waiting for {len(running_instances)} instances to reboot...")
+                    waiter = ec2.get_waiter('instance_running')
+                    waiter.wait(InstanceIds=running_instances)
+                    logging.info("[Reboot] All instances have been rebooted successfully")
+                else:
+                    logging.warning("[Reboot] No instances were rebooted")
+            else:
+                logging.info("[Reboot] No instances found to reboot")
+                
         except Exception as e:
-            logging.error(f"[Verify] Failed to check EC2 instances: {str(e)}")
+            logging.error(f"[Reboot] Error during instance reboot process: {str(e)}")
+            raise
+
+    def reset_sqs_queues(self):
+        """Reset all SQS queues by purging and setting attributes"""
+        logging.info("[Reset] Resetting SQS queues...")
+        queue_urls = {
+            'crawl': self.crawl_queue_url,
+            'report': self.report_queue_url,
+            'request': self.request_queue_url,
+            'response': self.ResponseQueue,
+            'search': self.search_queue_url,
+            'feedback': self.index_feedback_queue_url,
+            'dead_letter': self.dead_letter_queue_url
+        }
+        
+        for queue_name, queue_url in queue_urls.items():
+            try:
+                # First purge the queue
+                self.sqs.purge_queue(QueueUrl=queue_url)
+                logging.info(f"[Reset] Purged {queue_name} queue")
+                
+                # Reset queue attributes
+                attributes = {
+                    'VisibilityTimeout': '120',  # 2 minutes
+                    'MessageRetentionPeriod': '345600',  # 4 days
+                    'DelaySeconds': '0',
+                    'ReceiveMessageWaitTimeSeconds': '5'  # Long polling
+                }
+                
+                # Add dead-letter queue configuration for main queues
+                if queue_name in ['crawl', 'report', 'request', 'search']:
+                    attributes['RedrivePolicy'] = json.dumps({
+                        'deadLetterTargetArn': self.dead_letter_queue_url,
+                        'maxReceiveCount': '3'
+                    })
+                
+                self.sqs.set_queue_attributes(
+                    QueueUrl=queue_url,
+                    Attributes=attributes
+                )
+                logging.info(f"[Reset] Reset attributes for {queue_name} queue")
+                
+            except Exception as e:
+                logging.error(f"[Reset] Failed to reset {queue_name} queue: {str(e)}")
+                raise
+
+    def reset_dynamodb_tables(self):
+        """Reset all DynamoDB tables by clearing and updating capacity"""
+        logging.info("[Reset] Resetting DynamoDB tables...")
+        tables = {
+            'heartbeat': {
+                'table': self.heartbeat_table,
+                'key': 'crawler_id',
+                'capacity': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+            },
+            'indexer_heartbeat': {
+                'table': self.indexer_heartbeat_table,
+                'key': 'indexer_id',
+                'capacity': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+            },
+            'task': {
+                'table': self.task_table,
+                'key': 'url',
+                'capacity': {'ReadCapacityUnits': 10, 'WriteCapacityUnits': 10}
+            },
+            'index_status': {
+                'table': self.index_status_table,
+                'key': 'url',
+                'capacity': {'ReadCapacityUnits': 10, 'WriteCapacityUnits': 10}
+            },
+            'blocked': {
+                'table': self.blocked_table,
+                'key': 'url',
+                'capacity': {'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
+            }
+        }
+        
+        for table_name, table_info in tables.items():
+            try:
+                # Clear the table
+                response = table_info['table'].scan()
+                items = response.get('Items', [])
+                
+                with table_info['table'].batch_writer() as batch:
+                    for item in items:
+                        batch.delete_item(Key={table_info['key']: item[table_info['key']]})
+                
+                logging.info(f"[Reset] Cleared {table_name} table")
+                
+                # Update table capacity
+                table_info['table'].update(
+                    ProvisionedThroughput=table_info['capacity']
+                )
+                logging.info(f"[Reset] Updated capacity for {table_name} table")
+                
+            except Exception as e:
+                logging.error(f"[Reset] Failed to reset {table_name} table: {str(e)}")
+                raise
 
     def reset_system_state(self):
         """Reset all system state and clean up resources"""
         logging.info("[Master] Resetting system state...")
         try:
-            # First, terminate all running instances to stop any active processing
+            # Reset AWS services first
+            self.reset_sqs_queues()
+            self.reset_dynamodb_tables()
+            
+            # Reset counters and state
+            self.last_crawl_count = 0
+            self.last_crawl_time = time.time()
+            self.last_indexed_count = 0
+            self.last_indexed_time = time.time()
+            self.running = False
+            
+            # Handle EC2 instances
             ec2 = boto3.client('ec2', region_name=self.region_name)
             response = ec2.describe_instances(
                 Filters=[
@@ -1032,70 +969,17 @@ class MasterNode:
             
             if instance_ids:
                 ec2.terminate_instances(InstanceIds=instance_ids)
-                logging.info(f"[Reset] Terminated {len(instance_ids)} running instances")
+                logging.info(f"[Reset] Terminated {len(instance_ids)} instances")
                 # Wait for instances to terminate
                 time.sleep(10)
-
-            # Purge all queues first to prevent new processing
-            queue_urls = [
-                self.crawl_queue_url,
-                self.report_queue_url,
-                self.request_queue_url,
-                self.ResponseQueue,
-                self.search_queue_url,
-                self.index_feedback_queue_url,
-                self.dead_letter_queue_url
-            ]
             
-            for queue_url in queue_urls:
-                try:
-                    self.sqs.purge_queue(QueueUrl=queue_url)
-                    logging.info(f"[Reset] Purged queue: {queue_url}")
-                except Exception as e:
-                    logging.error(f"[Reset] Failed to purge queue {queue_url}: {str(e)}")
-
-            # Wait for queues to be purged
-            time.sleep(5)
-
-            # Now reset all DynamoDB tables
-            tables = {
-                'heartbeat': self.heartbeat_table,
-                'indexer_heartbeat': self.indexer_heartbeat_table,
-                'task': self.task_table,
-                'index_status': self.index_status_table,
-                'blocked': self.blocked_table
-            }
-
-            for table_name, table in tables.items():
-                try:
-                    # Get all items
-                    response = table.scan()
-                    items = response.get('Items', [])
-                    
-                    # Delete items in batches of 25 (DynamoDB batch write limit)
-                    with table.batch_writer() as batch:
-                        for item in items:
-                            if table_name == 'heartbeat':
-                                batch.delete_item(Key={'crawler_id': item['crawler_id']})
-                            elif table_name == 'indexer_heartbeat':
-                                batch.delete_item(Key={'indexer_id': item['indexer_id']})
-                            elif table_name == 'task':
-                                batch.delete_item(Key={'url': item['url']})
-                            elif table_name == 'index_status':
-                                batch.delete_item(Key={'url': item['url']})
-                            elif table_name == 'blocked':
-                                batch.delete_item(Key={'url': item['url']})
-                    
-                    logging.info(f"[Reset] Cleared {table_name} table")
-                except Exception as e:
-                    logging.error(f"[Reset] Failed to clear {table_name} table: {str(e)}")
-
-            # Reset all counters and state
-            self.last_crawl_count = 0
-            self.last_crawl_time = time.time()
-            self.last_indexed_count = 0
-            self.last_indexed_time = time.time()
-            self.running = False
+            # Start fresh crawlers
+            for _ in range(2):
+                self.start_backup_crawler()
+            logging.info("[Reset] Started 2 initial crawlers")
+            
+            # Wait for crawlers to be running
+            time.sleep(30)
             
             # Verify cleanup
             self.verify_cleanup()
@@ -1128,12 +1012,12 @@ if __name__ == "__main__":
         indexer_heartbeat_table_name = 'IndexerHeartbeatTable',
         max_depth=2)
 
-    # Reset system state before starting
+    # Reset system state before starting (now includes rebooting instances)
     master.reset_system_state()
     
-    # Wait a moment to ensure all cleanup is complete
-    time.sleep(5)
+    # Wait a moment to ensure all cleanup and reboots are complete
+    time.sleep(10)  # Increased wait time to account for reboots
     
     logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
-    ####s
+    ####
