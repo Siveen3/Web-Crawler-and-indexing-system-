@@ -134,10 +134,10 @@ class Client:
                             'crawl_stats': {
                                 'total_tasks': feedback.get('total_tasks', 0),
                                 'crawled_pages': feedback.get('crawled', 0),
+                                'indexed_pages': feedback.get('total_indexed', 0),
                                 'failed_crawls': feedback.get('crawl_failed', 0),
                                 'politeness': feedback.get('politeness', 0),
-                                'crawl_coverage': feedback.get('crawl_coverage', 0),
-                                'total_indexed': feedback.get('total_indexed', 0)
+                                'crawl_coverage': feedback.get('crawl_coverage', 0)
                             },
                             'rates': {
                                 'crawl_rate': feedback.get('crawl_rate', 0),
@@ -166,15 +166,15 @@ class Client:
             'crawl_stats': {
                 'total_tasks': 0,
                 'crawled_pages': 0,
+                'indexed_pages': 0,
                 'failed_crawls': 0,
                 'politeness': 0,
-                'crawl_coverage': 0,
-                'total_indexed': 0
+                'crawl_coverage': 0
             },
             'rates': {
                 'crawl_rate': 0,
                 'indexing_rate': 0
-            },
+            }
         }
 
 
@@ -263,21 +263,28 @@ def dashboard():
     monitoring_data = client.receive_monitoring_data()
     if not monitoring_data:
         monitoring_data = {
-            'active_crawlers': 0,
-            'crawled_urls': 0,
-            'crawl_rate': 0,
-            'indexing_rate': 0,
+            'crawl_stats': {
+                'total_tasks': 0,
+                'crawled_pages': 0,
+                'indexed_pages': 0,
+                'failed_crawls': 0,
+                'politeness': 0,
+                'crawl_coverage': 0
+            },
+            'rates': {
+                'crawl_rate': 0,
+                'indexing_rate': 0
+            },
             'error_rates': {
-                'index_error_rate': 0,
                 'search_error_rate': 0,
-                'total_indexed': 0
+                'crawl_error_rate': 0,
+                'index_error_rate': 0
             },
             'crawler_status': {
                 'active': 0,
                 'failed': 0,
                 'shutdown': 0
-            },
-            'queue_status': 0
+            }
         }
     return render_template('dashboard.html', stats=monitoring_data)
 

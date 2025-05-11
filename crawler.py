@@ -17,10 +17,10 @@ class Crawler:
                  crawler_queue_url, 
                  master_queue_url, 
                  indexer_queue_url, 
-                 s3_bucket,
+                 s3_bucket, 
                  dynamodb_table,
                  region='us-east-1',
-                 delay=1    # Politeness logic
+                 delay=10  # Politeness logic
                  ):
 
         # Initialization of crawler node.
@@ -48,18 +48,6 @@ class Crawler:
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
-
-    def handle_shutdown(self, signum, frame):
-        logging.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
-        self.send_to_master(
-            url="",
-            extracted_urls=[],
-            depth=-1,
-            status="shutdown",
-            error="Crawler is about to shut down due to manual request"
-        )
-        self.shutdown_requested = True
-
     def heartbeat(self):
         try:
             self.heartbeat_table.put_item(
@@ -73,6 +61,70 @@ class Crawler:
         
         except Exception as e:
             logging.error(f"Failed to send heartbeat: {e}")    
+
+    def handle_shutdown(self, signum, frame):
+        logging.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
+        self.send_to_master(
+            url="",
+            extracted_urls=[],
+            depth=-1,
+            status="shutdown",
+            error="Crawler is about to shut down due to manual request"
+        )
+        self.shutdown_requested = True
+
+    def handle_master_shutdown(self, receipt_handle):
+        # Handle shutdown signal from master node
+        logging.info(f"[Crawler {self.crawler_id}] Received shutdown signal from master")
+        self.send_to_master(
+            url="",
+            extracted_urls=[],
+            depth=-1,
+            status="shutdown",
+            error="Received shutdown signal from master"
+        )
+        # Remove from heartbeat table
+        try:
+            self.heartbeat_table.delete_item(
+                Key={'crawler_id': self.crawler_id}
+            )
+            logging.info(f"[Crawler {self.crawler_id}] Removed from heartbeat table")
+        except Exception as e:
+            logging.error(f"[Crawler {self.crawler_id}] Error removing from heartbeat table: {e}")
+        
+        # Delete the message
+        self.sqs.delete_message(
+            QueueUrl=self.crawler_queue_url,
+            ReceiptHandle=receipt_handle
+        )
+        logging.info(f"[Crawler {self.crawler_id}] Entered shutdown state")
+        self.is_shutdown = True
+        return True
+
+    def handle_wake_up(self, receipt_handle):
+        """Handle wake-up signal from master node"""
+        logging.info(f"[Crawler {self.crawler_id}] Received wake-up signal from master")
+        # Register in heartbeat table
+        try:
+            self.heartbeat_table.put_item(
+                Item={
+                    'crawler_id': self.crawler_id,
+                    'status': 'running',
+                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
+                }
+            )
+            logging.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table")
+        except Exception as e:
+            logging.error(f"[Crawler {self.crawler_id}] Error registering in heartbeat table: {e}")
+            return False
+        
+        # Delete the message
+        self.sqs.delete_message(
+            QueueUrl=self.crawler_queue_url,
+            ReceiptHandle=receipt_handle
+        )
+        logging.info(f"[Crawler {self.crawler_id}] Ready to process URLs")
+        return True
 
     def is_allowed_by_robots(self, url):
         parsed = urlparse(url)
@@ -190,74 +242,22 @@ class Crawler:
         except Exception as e:
             logging.error(f"Failed to send index data for URL: {url} | Error: {e}")
 
-    def handle_master_shutdown(self, receipt_handle):
-        """Handle shutdown signal from master node"""
-        logging.info(f"[Crawler {self.crawler_id}] Received shutdown signal from master")
-        self.send_to_master(
-            url="",
-            extracted_urls=[],
-            depth=-1,
-            status="shutdown",
-            error="Received shutdown signal from master"
-        )
-        # Remove from heartbeat table
-        try:
-            self.heartbeat_table.delete_item(
-                Key={'crawler_id': self.crawler_id}
-            )
-            logging.info(f"[Crawler {self.crawler_id}] Removed from heartbeat table")
-        except Exception as e:
-            logging.error(f"[Crawler {self.crawler_id}] Error removing from heartbeat table: {e}")
-        
-        # Delete the message
-        self.sqs.delete_message(
-            QueueUrl=self.crawler_queue_url,
-            ReceiptHandle=receipt_handle
-        )
-        logging.info(f"[Crawler {self.crawler_id}] Entered shutdown state")
-        self.is_shutdown = True
-        return True
-
-    def handle_wake_up(self, receipt_handle):
-        """Handle wake-up signal from master node"""
-        logging.info(f"[Crawler {self.crawler_id}] Received wake-up signal from master")
-        # Register in heartbeat table
-        try:
-            self.heartbeat_table.put_item(
-                Item={
-                    'crawler_id': self.crawler_id,
-                    'status': 'running',
-                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
-                }
-            )
-            logging.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table")
-        except Exception as e:
-            logging.error(f"[Crawler {self.crawler_id}] Error registering in heartbeat table: {e}")
-            return False
-        
-        # Delete the message
-        self.sqs.delete_message(
-            QueueUrl=self.crawler_queue_url,
-            ReceiptHandle=receipt_handle
-        )
-        logging.info(f"[Crawler {self.crawler_id}] Ready to process URLs")
-        return True
-
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
         while True:
             # Send a heartbeat at the start of each iteration
             self.heartbeat()
             
+            # Check for shutdown request
+            if self.shutdown_requested:
+                logging.info("Shutdown requested. Exiting crawler before processing new messages.")
+                break
+            
             response = self.sqs.receive_message(
                 QueueUrl = self.crawler_queue_url,
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=10
             )
-
-            if self.shutdown_requested:
-                logging.info("Shutdown requested. Exiting before processing new messages.")
-                break
 
             messages = response.get('Messages', [])
             if not messages:
@@ -266,10 +266,6 @@ class Crawler:
                 continue
 
             message = messages[0]
-            if self.shutdown_requested:
-                logging.info("Shutdown requested. Exiting during message processing.")
-                break
-
             receipt_handle = message['ReceiptHandle']
             body = json.loads(message['Body'])
             
