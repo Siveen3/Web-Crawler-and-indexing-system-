@@ -10,7 +10,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 import secrets
 
 class Client:
-    def __init__(self, request_queue_url, response_queue_url, region='us-east-1', timeout=10):
+    def __init__(self, request_queue_url, response_queue_url, region='us-east-1', timeout=60):
         self.request_queue_url = request_queue_url
         self.response_queue_url = response_queue_url
         self.region = region
@@ -250,7 +250,7 @@ def search():
 @app.route('/crawl', methods=['POST'])
 def crawl():
     seed_urls = request.form['seeds'].splitlines()
-    depth = int(request.form.get('depth', 2))
+    depth = int(request.form.get('depth', 1))
     domain = request.form.get('domain', None)
     client.submit_seed_urls(seed_urls, max_depth=depth, domain=domain)
     message = f"{len(seed_urls)} seed URL(s) submitted for crawling."

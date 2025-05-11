@@ -39,7 +39,6 @@ class Crawler:
         self.s3 = boto3.client('s3', region_name=self.region)    # AWS S3 client
         self.dynamodb = boto3.resource('dynamodb', region_name=self.region)
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
-        self.crawled_table = self.dynamodb.Table(self.dynamodb_table)
         # Configure logging to show time, log level, and message
         logging.basicConfig(filename=f'crawler_{self.crawler_id}.log', filemode='w', level=logging.INFO, 
                             format='%(asctime)s [%(levelname)s] %(message)s')
@@ -73,24 +72,7 @@ class Crawler:
             logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {datetime.now()}")
         
         except Exception as e:
-            logging.error(f"Failed to send heartbeat: {e}")
-
-
-    def save_crawled_url(self, url, domain, s3_key):
-        try:
-            self.crawled_table.put_item(
-                Item={
-                    'url': url,
-                    'domain': domain,
-                    's3_key': s3_key,
-                    'timestamp': datetime.now(timezone.utc).isoformat()
-                }
-            )
-            logging.info(f"Saved crawled URL: {url} to crawled_table")
-        except Exception as e:
-            logging.error(f"Failed to save crawled URL: {url} | Error: {e}")
-            self.send_to_master(url=url, extracted_urls=[], depth=-1, status="failed", error=f"Failed to save to crawled_table: {e}")
-            
+            logging.error(f"Failed to send heartbeat: {e}")    
 
     def is_allowed_by_robots(self, url):
         parsed = urlparse(url)
