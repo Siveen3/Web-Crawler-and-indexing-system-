@@ -89,7 +89,7 @@ class MasterNode:
         if isinstance(depth, Decimal):
             depth = int(depth)
         elif not isinstance(depth, int) or depth < 0:
-            logging.warning(f"[Master] Invalid depth: {depth}. Defaulting to 0.")
+            logging.warning(f"[Master] Invalid depth: {depth}. ")
             
         if self.is_blocked_url(url):
             logging.warning(f"[Master] Skipping blocked URL: {url}")
@@ -131,6 +131,11 @@ class MasterNode:
                     'retries': Decimal(str(0))
                 }
             )
+            
+            # Only update dashboard for new root URLs (depth 0)
+            if depth == 0:
+                self.print_dashboard()
+                
         except Exception as e:
             logging.error(f"Failed to send URL to crawl queue: {str(e)}")
             raise
@@ -246,14 +251,16 @@ class MasterNode:
                 error = body.get('error', '')
                 timestamp = body.get('timestamp')
                 client_id = body.get('client_id', None)
+                query = body.get('query', None)
 
-                if status == "search_success":
+                if status == "search_success" or status == "search_failed":
                     self.forward_search_result_to_client(msg_content, client_id)
                     item = {
-                        'url': json.loads(msg_content).get('url', 'unknown'),
+                        'url': query,  # Use query instead of url for search results
                         'status': status,
                         'timestamp': timestamp
                     }
+                
                 else:
                     item = {
                         'url': msg_content,
@@ -274,7 +281,12 @@ class MasterNode:
     
     def forward_search_result_to_client(self, result_json_str, client_id):
         try:
-            result_json = json.loads(result_json_str)
+            # Handle both string and list results
+            if isinstance(result_json_str, str):
+                result_json = json.loads(result_json_str)
+            else:
+                result_json = result_json_str  # Already a Python object (list/dict)
+                
             # Add client_id to the response
             response_message = {        
                 'client_id': client_id,
@@ -287,6 +299,8 @@ class MasterNode:
             logging.info(f"[Forwarded] Search result sent to client queue for client {client_id}: {result_json}")
         except json.JSONDecodeError:
             logging.error(f"[Forwarded] Failed to decode result_json: {result_json_str}")
+        except Exception as e:
+            logging.error(f"[Forwarded] Error forwarding search result: {str(e)}")
 
 
     def compute_index_search_error_rates(self):
@@ -616,9 +630,7 @@ class MasterNode:
             else:
                 logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
 
-        # Print dashboard at the end of the monitoring cycle
-        self.print_dashboard()
-
+      
     def count_active_crawlers(self):
         """Return the number of crawlers with status 'running'."""
         response = self.heartbeat_table.scan()
