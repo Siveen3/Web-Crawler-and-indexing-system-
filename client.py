@@ -160,8 +160,8 @@ class Client:
         raise NotImplementedError("Use request_monitoring_data() instead")
 
 
-client = Client("https://sqs.us-east-1.amazonaws.com/138749495090/RequestQueue", 
-                "https://sqs.us-east-1.amazonaws.com/138749495090/ResponseQueue")
+client = Client("https://sqs.us-east-1.amazonaws.com/353176954707/RequestQueue", 
+                "https://sqs.us-east-1.amazonaws.com/353176954707/ResponseQueue")
 
 
 # Flask app setup
@@ -266,4 +266,4 @@ def dashboard():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(host = '0.0.0.0', port = 5000, debug=True)
