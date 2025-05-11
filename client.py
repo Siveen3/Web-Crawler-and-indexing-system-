@@ -7,7 +7,7 @@ import uuid
 import logging
 from botocore.exceptions import ClientError
 from werkzeug.security import generate_password_hash, check_password_hash
-
+import secrets
 
 class Client:
     def __init__(self, request_queue_url, response_queue_url, region='us-east-1', timeout=10):
@@ -57,18 +57,19 @@ class Client:
                     message = messages[0]
                     body = json.loads(message['Body'])
                     # Check if this result belongs to this client
-                    if (body.get('client_id') == self.client_id):
-                        try:
-                            # Try to delete the message
-                            self.sqs.delete_message(
-                                QueueUrl=self.response_queue_url,
-                                ReceiptHandle=message['ReceiptHandle']
-                            )
-                            return body
-                        except Exception as e:
-                            # If delete fails, message will return to queue after visibility timeout
-                            logging.error(f"Failed to delete message: {str(e)}")
-                            continue
+                    if not body.get('feedback', {}):
+                        if (body.get('client_id') == self.client_id):
+                            try:
+                                # Try to delete the message
+                                self.sqs.delete_message(
+                                    QueueUrl=self.response_queue_url,
+                                    ReceiptHandle=message['ReceiptHandle']
+                                )
+                                return body.get('result', [])
+                            except Exception as e:
+                                # If delete fails, message will return to queue after visibility timeout
+                                logging.error(f"Failed to delete message: {str(e)}")
+                                continue
                     else:
                         # If not our message, put it back in the queue immediately
                         self.sqs.change_message_visibility(
@@ -97,17 +98,7 @@ class Client:
                 MessageBody=json.dumps(message)
             )
 
-    def request_monitoring_data(self):
-        """Request monitoring data from master node via SQS"""
-        message = {
-            "type": "monitoring_request",
-            "client_id": self.client_id
-        }
-        self.sqs.send_message(
-            QueueUrl=self.request_queue_url,
-            MessageBody=json.dumps(message)
-        )
-        
+    def receive_monitoring_data(self):
         # Wait for response
         start = time.time()
         while time.time() - start < self.timeout:
@@ -121,13 +112,38 @@ class Client:
             if messages:
                 message = messages[0]
                 body = json.loads(message['Body'])
-                if body.get('client_id') == self.client_id and body.get('type') == 'monitoring_data':
+                if body.get('feedback', {}):
                     try:
                         self.sqs.delete_message(
                             QueueUrl=self.response_queue_url,
                             ReceiptHandle=message['ReceiptHandle']
                         )
-                        return body.get('data', {})
+                        feedback = body.get('feedback', {})
+                        # Format the feedback data
+                        return {
+                            'error_rates': {
+                                'search_error_rate': feedback.get('search_error_rate', 0),
+                                'crawl_error_rate': feedback.get('crawl_error_rate', 0),
+                                'index_error_rate': feedback.get('index_error_rate', 0)
+                            },
+                            'crawler_status': {
+                                'active': feedback.get('active', 0),
+                                'failed': feedback.get('failed', 0),
+                                'shutdown': feedback.get('shutdown', 0)
+                            },
+                            'crawl_stats': {
+                                'total_tasks': feedback.get('total_tasks', 0),
+                                'crawled_pages': feedback.get('crawled', 0),
+                                'failed_crawls': feedback.get('crawl_failed', 0),
+                                'politeness': feedback.get('politeness', 0),
+                                'crawl_coverage': feedback.get('crawl_coverage', 0),
+                                'total_indexed': feedback.get('total_indexed', 0)
+                            },
+                            'rates': {
+                                'crawl_rate': feedback.get('crawl_rate', 0),
+                                'indexing_rate': feedback.get('indexing_rate', 0)
+                            }
+                        }
                     except Exception as e:
                         logging.error(f"Failed to delete message: {str(e)}")
                 else:
@@ -136,28 +152,30 @@ class Client:
                         ReceiptHandle=message['ReceiptHandle'],
                         VisibilityTimeout=0
                     )
-        return {}
-
-    def count_active_crawlers(self):
-        raise NotImplementedError("Use request_monitoring_data() instead")
-
-    def count_crawled_urls(self):
-        raise NotImplementedError("Use request_monitoring_data() instead")
-
-    def get_crawl_rate(self):
-        raise NotImplementedError("Use request_monitoring_data() instead")
-
-    def get_indexing_rate(self):
-        raise NotImplementedError("Use request_monitoring_data() instead")
-
-    def get_error_rates(self):
-        raise NotImplementedError("Use request_monitoring_data() instead")
-
-    def get_crawler_status(self):
-        raise NotImplementedError("Use request_monitoring_data() instead")
-
-    def get_queue_status(self):
-        raise NotImplementedError("Use request_monitoring_data() instead")
+        return {
+            'error_rates': {
+                'search_error_rate': 0,
+                'crawl_error_rate': 0,
+                'index_error_rate': 0
+            },
+            'crawler_status': {
+                'active': 0,
+                'failed': 0,
+                'shutdown': 0
+            },
+            'crawl_stats': {
+                'total_tasks': 0,
+                'crawled_pages': 0,
+                'failed_crawls': 0,
+                'politeness': 0,
+                'crawl_coverage': 0,
+                'total_indexed': 0
+            },
+            'rates': {
+                'crawl_rate': 0,
+                'indexing_rate': 0
+            },
+        }
 
 
 client = Client("https://sqs.us-east-1.amazonaws.com/353176954707/RequestQueue", 
@@ -166,7 +184,7 @@ client = Client("https://sqs.us-east-1.amazonaws.com/353176954707/RequestQueue",
 
 # Flask app setup
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here'  # Change this to a secure secret key
+app.secret_key = secrets.token_hex(32)  # Generates a 64-character random hex string
 
 # Flask-Login setup
 login_manager = LoginManager()
@@ -229,7 +247,6 @@ def search():
     return render_template('index.html', query=query, results=results, message=message, selected_mode=mode)
 
 
-
 @app.route('/crawl', methods=['POST'])
 def crawl():
     seed_urls = request.form['seeds'].splitlines()
@@ -243,7 +260,7 @@ def crawl():
 @login_required
 def dashboard():
     # Get monitoring information via SQS
-    monitoring_data = client.request_monitoring_data()
+    monitoring_data = client.receive_monitoring_data()
     if not monitoring_data:
         monitoring_data = {
             'active_crawlers': 0,

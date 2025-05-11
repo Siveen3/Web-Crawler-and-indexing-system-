@@ -220,19 +220,19 @@
             <h2>System Overview</h2>
             <div class="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-value">{{ stats.active_crawlers }}</div>
+                    <div class="stat-value">{{ stats.crawler_status.active }}</div>
                     <div class="stat-label">Active Crawlers</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{{ stats.crawled_urls }}</div>
+                    <div class="stat-value">{{ stats.crawl_stats.crawled_pages }}</div>
                     <div class="stat-label">Pages Crawled</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{{ stats.crawl_rate }}</div>
+                    <div class="stat-value">{{ stats.rates.crawl_rate }}</div>
                     <div class="stat-label">Crawl Rate (URLs/sec)</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-value">{{ stats.indexing_rate }}</div>
+                    <div class="stat-value">{{ stats.rates.indexing_rate }}</div>
                     <div class="stat-label">Indexing Rate (URLs/sec)</div>
                 </div>
             </div>
@@ -268,18 +268,40 @@
                     <div class="stat-label">Search Error Rate</div>
                 </div>
                 <div class="error-rate">
-                    <div class="stat-value">{{ stats.error_rates.total_indexed }}</div>
-                    <div class="stat-label">Total Indexed URLs</div>
+                    <div class="error-value">{{ stats.error_rates.crawl_error_rate }}%</div>
+                    <div class="stat-label">Crawl Error Rate</div>
                 </div>
             </div>
         </div>
-        
+
         <div class="card">
-            <h2>Queue Status</h2>
+            <h2>Crawl Statistics</h2>
             <div class="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-value">{{ stats.queue_status }}</div>
-                    <div class="stat-label">Pending URLs in Queue</div>
+                    <div class="stat-value">{{ stats.crawl_stats.crawl_coverage }}%</div>
+                    <div class="stat-label">Crawl Coverage</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">{{ stats.crawl_stats.total_tasks }}</div>
+                    <div class="stat-label">Total Tasks</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">{{ stats.crawl_stats.failed_crawls }}</div>
+                    <div class="stat-label">Failed Crawls</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value">{{ stats.crawl_stats.politeness }}</div>
+                    <div class="stat-label">Skipped (Politeness)</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Indexing Statistics</h2>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value">{{ stats.crawl_stats.total_indexed }}</div>
+                    <div class="stat-label">Total Indexed URLs</div>
                 </div>
             </div>
         </div>
