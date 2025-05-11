@@ -70,7 +70,7 @@ class MasterNode:
             print(f"Failed to initialize logging: {str(e)}")
             raise
 
-    def send_url_to_crawl_queue(self, url, domain, depth=0):
+    def send_url_to_crawl_queue(self, url, domain, depth=0, max_depth=2):
         """
         Send a URL to the crawl queue for processing.
         
@@ -109,6 +109,7 @@ class MasterNode:
             message = {
                 "url": url,
                 "depth": depth,
+                "max_depth": max_depth,
                 "domain": domain,
                 "assigned_at": assigned_at
             }
@@ -178,7 +179,8 @@ class MasterNode:
                 elif msg_type == 'crawl':
                     url = body.get('url')
                     domain = body.get('domain')
-                    depth = body.get('depth', 0)
+                    depth = 0
+                    max_depth = min(body.get('depth', 0), self.max_depth)
                     assigned_at = datetime.now(timezone.utc).isoformat()
                     
                     # Record in task table
@@ -193,13 +195,20 @@ class MasterNode:
                         }
                     )
                     
-                    # Forward to crawl queue
+                    # Forward to crawl queue with both depth and max_depth
+                    crawl_message = {
+                        "type": "crawl",
+                        "url": url,
+                        "depth": depth,
+                        "max_depth": max_depth,
+                        "domain": domain,
+                        "client_id": client_id
+                    }
                     self.sqs.send_message(
                         QueueUrl=self.crawl_queue_url,
-                        MessageBody=json.dumps(body)
+                        MessageBody=json.dumps(crawl_message)
                     )
-                    logging.info(f"[Request] Forwarded crawl request to crawl queue: {body}")
-
+                    logging.info(f"[Request] Forwarded crawl request to crawl queue: {crawl_message}")
 
                 self.sqs.delete_message(
                     QueueUrl=self.request_queue_url,
@@ -538,16 +547,17 @@ class MasterNode:
                         crawler_id = body.get('crawler_id', 'unknown')
                         crawled_url = body.get('url', '')
                         extracted_urls = body.get('extracted_urls', [])
-                        depth = body.get('depth') or 0
+                        depth = body.get('depth', 0)
+                        max_depth = body.get('max_depth', self.max_depth)
                         status = body.get('status', 'unknown')
                         error = body.get('error', '')
                         domain = body.get('domain', None)
                         
                         if status == 'success':
                             logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
-                            if depth < self.max_depth:
+                            if depth < max_depth:
                                 for url in extracted_urls:
-                                    self.send_url_to_crawl_queue(url, domain, depth=depth+1)
+                                    self.send_url_to_crawl_queue(url, domain, depth=depth+1, max_depth=max_depth)
                             self.task_table.update_item(
                                 Key={'url': crawled_url},
                                 UpdateExpression="SET #s = :s",
@@ -575,7 +585,7 @@ class MasterNode:
                                 response = self.task_table.get_item(Key={'url': crawled_url})
                                 retries = response.get('Item', {}).get('retries', 0)
                                 if retries < 3:
-                                    self.send_url_to_crawl_queue(crawled_url, domain, depth=depth)
+                                    self.send_url_to_crawl_queue(crawled_url, domain, depth=depth, max_depth=max_depth)
                                     self.task_table.update_item(
                                         Key={'url': crawled_url},
                                         UpdateExpression="SET retries = :r, assigned_at = :t",
@@ -635,12 +645,13 @@ class MasterNode:
             retries = item.get('retries', 0)
             url = item.get('url')
             depth = item.get('depth')
+            max_depth = item.get('max_depth')
             domain = item.get('domain', None)
 
             if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
                 if retries < 3:
                     logging.warning(f"[Timeout] Requeuing stale task: {url}")
-                    self.send_url_to_crawl_queue(url, domain, depth=depth)
+                    self.send_url_to_crawl_queue(url, domain, depth=depth, max_depth=max_depth)
                     # Delete old item
                     self.task_table.delete_item(Key={'url': url})
                     # Put new item with updated assigned_at and incremented retries
@@ -649,6 +660,7 @@ class MasterNode:
                             'url': url,
                             'assigned_at': now.isoformat(),
                             'depth': Decimal(str(depth)),
+                            'max_depth': Decimal(str(max_depth)),
                             'status': 'pending',
                             'retries': Decimal(str(retries + 1))
                         }
@@ -1126,7 +1138,7 @@ if __name__ == "__main__":
         search_queue_url = 'https://sqs.us-east-1.amazonaws.com/353176954707/SearchQueue',
         index_status_table_name = 'IndexerTaskAssignments',
         indexer_heartbeat_table_name = 'IndexerHeartbeatTable',
-        max_depth=2)
+        max_depth=5)
 
     # Reset system state before starting
     master.reset_system_state()

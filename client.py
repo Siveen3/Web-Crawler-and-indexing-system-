@@ -82,7 +82,7 @@ class Client:
                 time.sleep(1)  # Add delay before retrying
         return []
 
-    def submit_seed_urls(self, seed_urls, max_depth=2, domain=None):
+    def submit_seed_urls(self, seed_urls, max_depth=None, domain=None):
         for url in seed_urls:
             message = {
                 "type": "crawl",

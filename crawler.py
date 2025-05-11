@@ -68,6 +68,7 @@ class Crawler:
             url="",
             extracted_urls=[],
             depth=-1,
+            max_depth=-1,
             status="shutdown",
             error="Crawler is about to shut down due to manual request"
         )
@@ -80,6 +81,7 @@ class Crawler:
             url="",
             extracted_urls=[],
             depth=-1,
+            max_depth=-1,
             status="shutdown",
             error="Received shutdown signal from master"
         )
@@ -185,7 +187,7 @@ class Crawler:
         return title, text_content, meta_description, canonical_url, urls, keywords
 
 
-    def send_to_master(self, url, extracted_urls, depth, status, error=None, assigned_at=None, domain=None):
+    def send_to_master(self, url, extracted_urls, depth, max_depth, status, error=None, assigned_at=None, domain=None):
         # Send crawl results (urls and status) to the master queue.
         message = {
             "crawler_id": self.crawler_id,
@@ -194,6 +196,7 @@ class Crawler:
             "url": url,
             "extracted_urls": extracted_urls,
             "depth": depth,
+            "max_depth": max_depth,
             "domain": domain,
             "assigned_at": assigned_at,
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -286,13 +289,14 @@ class Crawler:
             if not self.is_shutdown:
                 url = body.get('url')
                 depth = body.get('depth', 0)
+                max_depth = body.get('max_depth', 2)  # Default to 2 if not provided
                 domain = body.get('domain')
                 assigned_at = body.get('assigned_at')
                 logging.info(f"Processing URL: {url}")
 
                 if not self.is_allowed_by_robots(url):
                     logging.warning(f"URL blocked by robots.txt: {url}")
-                    self.send_to_master(url=url, extracted_urls=[], depth=depth, status="skipped", error="robots.txt disallowed")
+                    self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="skipped", error="robots.txt disallowed")
                     continue
 
                 html_content = self.fetch_url(url)
@@ -301,16 +305,16 @@ class Crawler:
                     title, text_content, meta_description, canonical_url, extracted_urls, keywords = self.extract_content(html_content, url, domain)
                     logging.info(f"Successfully processed URL: {url}")
 
-                    self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, domain=domain, assigned_at=assigned_at)
+                    self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, max_depth=max_depth, domain=domain, assigned_at=assigned_at)
                     s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content, keywords)
                     if s3_key:
                         self.send_to_indexer(s3_key, url)
                     else:
                         logging.error(f"Failed to upload content to S3 for URL: {url}")
-                        self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to upload to S3")
+                        self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to upload to S3")
                 else:
                     logging.error(f"Failed to fetch URL: {url}")
-                    self.send_to_master(url=url, extracted_urls=[], depth=depth, status="failed", error="Failed to fetch")
+                    self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to fetch")
 
             # Delete the processed message from queue
             try:
