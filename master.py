@@ -152,16 +152,6 @@ class MasterNode:
         )
         logging.info(f"[Master] Sent wake-up signal to {crawler_id}")
 
-    def wake_up_all_crawlers(self):
-        """Wake up all crawlers that are in shutdown state"""
-        logging.info("[Master] Attempting to wake up all crawlers...")
-        response = self.heartbeat_table.scan()
-        for item in response['Items']:
-            crawler_id = item['crawler_id']
-            if item.get('status') == 'shutdown':
-                self.wake_up_crawler(crawler_id)
-                logging.info(f"[Master] Woke up crawler: {crawler_id}")
-
     def monitor_client_requests(self):
         logging.info("[Monitor] Listening for client requests...")
         while True:
@@ -339,26 +329,42 @@ class MasterNode:
             self.shutdown()
 
 
-    def monitor_crawlers_health(self):
-        logging.info("[Monitor] Checking crawler heartbeats...")
-        response = self.heartbeat_table.scan()
+    def monitor_health(self, table_name, node_type):
+        """Monitor the health of nodes by checking their heartbeats
+        
+        Args:
+            table_name (str): Name of the heartbeat table to monitor
+            node_type (str): Type of node ('crawler' or 'indexer')
+        """
+        logging.info(f"[Monitor] Checking {node_type} heartbeats...")
+        table = self.dynamodb.Table(table_name)
         now = datetime.now(timezone.utc)
 
-        for item in response['Items']:
-            crawler_id = item['crawler_id']
+        for item in table.scan()['Items']:
+            node_id = item[f'{node_type}_id']
             last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
             time_diff = (now - last_heartbeat).total_seconds()
+            
             if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
-                logging.warning(f"[Warning] {crawler_id} missed heartbeat! Declaring as failed.")
-                self.heartbeat_table.update_item(
-                    Key={'crawler_id': crawler_id},
+                logging.warning(f"[Warning] {node_id} missed heartbeat! Declaring as failed.")
+                table.update_item(
+                    Key={f'{node_type}_id': node_id},
                     UpdateExpression="SET #s = :s",
                     ExpressionAttributeNames={"#s": "status"},
                     ExpressionAttributeValues={":s": "failed"}
                 )
-                self.handle_failed_crawler(item)
+                if node_type == 'crawler':
+                    self.handle_failed_crawler(item)
             else:
-                logging.info(f"[Info] {crawler_id} is alive (last seen {int(time_diff)} seconds ago).")
+                logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago).")
+
+    def monitor_crawlers_health(self):
+        """Monitor the health of crawler nodes"""
+        self.monitor_health(self.heartbeat_table_name, 'crawler')
+
+    def monitor_indexers_health(self):
+        """Monitor the health of indexer nodes"""
+        self.monitor_health(self.indexer_heartbeat_table_name, 'indexer')
 
     def handle_failed_crawler(self, crawler_item):
         failed_task_url = crawler_item.get('current_task_url')
@@ -558,28 +564,6 @@ class MasterNode:
         response = self.blocked_table.get_item(Key={'url': url})
         return 'Item' in response
 
-    def monitor_indexers_health(self):
-        """Monitor the health of indexer nodes by checking their heartbeats"""
-        logging.info("[Monitor] Checking indexer heartbeats...")
-        response = self.indexer_heartbeat_table.scan()
-        now = datetime.now(timezone.utc)
-
-        for item in response['Items']:
-            indexer_id = item['indexer_id']
-            last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
-            time_diff = (now - last_heartbeat).total_seconds()
-            
-            if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
-                logging.warning(f"[Warning] {indexer_id} missed heartbeat! Declaring as failed.")
-                self.indexer_heartbeat_table.update_item(
-                    Key={'indexer_id': indexer_id},
-                    UpdateExpression="SET #s = :s",
-                    ExpressionAttributeNames={"#s": "status"},
-                    ExpressionAttributeValues={":s": "failed"}
-                )
-            else:
-                logging.info(f"[Info] {indexer_id} is alive (last seen {int(time_diff)} seconds ago).")
-
     def run_all_monitoring_tasks(self):
         """Run all monitoring tasks in sequence"""
         logging.info("[Master] Starting comprehensive monitoring cycle")
@@ -609,7 +593,6 @@ class MasterNode:
         # If queue is empty, perform completion tasks
         if num_messages == 0:
             logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
-            self.send_shutdown_signal_to_crawlers()
 
         else:
             # Dynamic scaling logic
@@ -637,6 +620,12 @@ class MasterNode:
         return sum(1 for item in response['Items'] if item.get('status') == 'running')
 
     def send_shutdown_signal_to_crawler(self, crawler_id):
+        # Check if crawler is already in shutdown state
+        response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_id})
+        if 'Item' in response and response['Item'].get('status') == 'shutdown':
+            logging.info(f"[Master] Crawler {crawler_id} is already in shutdown state.")
+            return
+
         shutdown_message = {
             "shutdown": True,
             "crawler_id": crawler_id
