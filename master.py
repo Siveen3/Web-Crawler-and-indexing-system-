@@ -77,17 +77,19 @@ class MasterNode:
         Args:
             url (str): The URL to crawl
             domain (str): The domain of the URL
-            depth (int): The current crawl depth (default: 0)
+            depth (int/Decimal): The current crawl depth (default: 0)
             
         Raises:
             ValueError: If url or domain is invalid
         """
         if not url or not isinstance(url, str):
             raise ValueError("URL must be a non-empty string")
-        if not domain or not isinstance(domain, str):
-            raise ValueError("Domain must be a non-empty string")
-        if not isinstance(depth, int) or depth < 0:
-            raise ValueError("Depth must be a non-negative integer")
+        
+        # Convert depth to int if it's a Decimal
+        if isinstance(depth, Decimal):
+            depth = int(depth)
+        elif not isinstance(depth, int) or depth < 0:
+            logging.warning(f"[Master] Invalid depth: {depth}. Defaulting to 0.")
             
         if self.is_blocked_url(url):
             logging.warning(f"[Master] Skipping blocked URL: {url}")
