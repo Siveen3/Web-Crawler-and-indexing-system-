@@ -695,6 +695,32 @@ class MasterNode:
         # If queue is empty, perform completion tasks
         if num_messages == 0:
             logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
+            # Terminate all running instances when queue is empty
+            try:
+                ec2 = boto3.client('ec2', region_name=self.region_name)
+                response = ec2.describe_instances(
+                    Filters=[
+                        {
+                            'Name': 'tag:Name',
+                            'Values': ['CrawlerNode']
+                        },
+                        {
+                            'Name': 'instance-state-name',
+                            'Values': ['running', 'pending']
+                        }
+                    ]
+                )
+                
+                instance_ids = []
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_ids.append(instance['InstanceId'])
+                
+                if instance_ids:
+                    ec2.terminate_instances(InstanceIds=instance_ids)
+                    logging.info(f"[Scaling] Terminated {len(instance_ids)} instances due to empty queue")
+            except Exception as e:
+                logging.error(f"[Scaling] Failed to terminate instances: {str(e)}")
 
         else:
             # Dynamic scaling logic
@@ -706,16 +732,51 @@ class MasterNode:
                 num_to_start = desired_crawlers - active_crawlers
                 self.ensure_crawlers(num_to_start)
             elif active_crawlers > desired_crawlers:
-                response = self.heartbeat_table.scan()
-                running_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'running']
-                # Shut down excess crawlers, but keep at least min_crawlers
-                for crawler_id in running_crawlers[desired_crawlers:]:
-                    self.send_shutdown_signal_to_crawler(crawler_id)
-                logging.info(f"[Scaling] Sent shutdown to {active_crawlers - desired_crawlers} crawlers (active: {active_crawlers} -> {desired_crawlers})")
+                # Get list of running instances
+                try:
+                    ec2 = boto3.client('ec2', region_name=self.region_name)
+                    response = ec2.describe_instances(
+                        Filters=[
+                            {
+                                'Name': 'tag:Name',
+                                'Values': ['CrawlerNode']
+                            },
+                            {
+                                'Name': 'instance-state-name',
+                                'Values': ['running', 'pending']
+                            }
+                        ]
+                    )
+                    
+                    # Get instance IDs to terminate
+                    instance_ids = []
+                    for reservation in response['Reservations']:
+                        for instance in reservation['Instances']:
+                            instance_ids.append(instance['InstanceId'])
+                    
+                    # Keep only the desired number of instances
+                    instances_to_terminate = instance_ids[desired_crawlers:]
+                    if instances_to_terminate:
+                        ec2.terminate_instances(InstanceIds=instances_to_terminate)
+                        logging.info(f"[Scaling] Terminated {len(instances_to_terminate)} excess instances (active: {active_crawlers} -> {desired_crawlers})")
+                        
+                        # Update heartbeat table for terminated instances
+                        for crawler_id in self.heartbeat_table.scan()['Items']:
+                            if crawler_id.get('status') == 'running':
+                                self.heartbeat_table.update_item(
+                                    Key={'crawler_id': crawler_id['crawler_id']},
+                                    UpdateExpression="SET #s = :s",
+                                    ExpressionAttributeNames={"#s": "status"},
+                                    ExpressionAttributeValues={":s": "shutdown"}
+                                )
+                except Exception as e:
+                    logging.error(f"[Scaling] Failed to terminate excess instances: {str(e)}")
             else:
                 logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
 
-      
+        # Print dashboard at the end of the monitoring cycle
+        self.print_dashboard()
+
     def count_active_crawlers(self):
         """Return the number of crawlers with status 'running'."""
         response = self.heartbeat_table.scan()
