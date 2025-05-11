@@ -394,28 +394,71 @@ class MasterNode:
             self.wake_up_crawler(crawler_id)
 
     def start_backup_crawler(self):
+        """Start a new crawler instance from the AMI"""
         ec2 = boto3.client('ec2', region_name=self.region_name)
-        # Use your AMI, instance type, security group, etc. Replace ImageId with your AMI ID
         try:
+            # Get the latest AMI ID for our crawler
+            response = ec2.describe_images(
+                Filters=[
+                    {
+                        'Name': 'name',
+                        'Values': ['crawler-ami-*']
+                    }
+                ]
+            )
+            
+            if not response['Images']:
+                logging.error("[Recovery] No crawler AMI found!")
+                return
+                
+            # Sort by creation date and get the latest
+            latest_ami = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)[0]
+            ami_id = latest_ami['ImageId']
+            
+            # Launch instance from AMI
             response = ec2.run_instances(
-                ImageId='ami-xxxxxxx',  #!AMI ID ON AWS MN MARIAM isA
+                ImageId=ami_id,
                 InstanceType='t2.micro',
                 MinCount=1,
                 MaxCount=1,
+                TagSpecifications=[
+                    {
+                        'ResourceType': 'instance',
+                        'Tags': [
+                            {
+                                'Key': 'Name',
+                                'Value': 'CrawlerNode'
+                            }
+                        ]
+                    }
+                ],
                 UserData='''#!/bin/bash
-                cd /path/to/crawler
-                python crawler.py
+                cd /home/ubuntu
+                # Activate virtual environment
+                source crawler-venv/bin/activate
+                # Set environment variables
+                export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
+                export MASTER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue"
+                export INDEXER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/IndexQueue"
+                export S3_BUCKET="crawler-indexer-buckets"
+                export DYNAMODB_TABLE="CrawlerHeartbeatTable"
+                export AWS_REGION="us-east-1"
+                export CRAWLER_DELAY="10"
+                # Run the crawler
+                python crawler_object.py
                 '''
             )
+            
             instance_id = response['Instances'][0]['InstanceId']
             logging.info(f"[Recovery] Starting backup crawler node with instance ID: {instance_id}")
+            
             # Wait for the instance to be running
             waiter = ec2.get_waiter('instance_running')
             waiter.wait(InstanceIds=[instance_id])
             logging.info(f"[Recovery] Backup crawler node {instance_id} is now running.")
+            
         except Exception as e:
             logging.error(f"[Recovery] Failed to start backup crawler: {e}")
-
 
     def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
@@ -597,7 +640,7 @@ class MasterNode:
         else:
             # Dynamic scaling logic
             active_crawlers = self.count_active_crawlers()
-            min_crawlers = 1
+            min_crawlers = 2
             desired_crawlers = max(min_crawlers, min(num_messages // 10 + 1, 10))
 
             if active_crawlers < desired_crawlers:
@@ -641,12 +684,15 @@ class MasterNode:
         response = self.heartbeat_table.scan()
         shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
         num_woken = 0
+        
         for crawler_id in shutdown_crawlers[:num_to_start]:
             self.wake_up_crawler(crawler_id)
             num_woken += 1
+            
         num_to_start_new = num_to_start - num_woken
         for _ in range(num_to_start_new):
             self.start_backup_crawler()
+            
         logging.info(f"[Scaling] Woke up {num_woken} shutdown crawlers, started {num_to_start_new} new crawlers.")
 
     def print_crawl_quality_metrics(self):
