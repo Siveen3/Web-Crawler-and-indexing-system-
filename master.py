@@ -22,6 +22,7 @@ class MasterNode:
          self.dead_letter_queue_url = dead_letter_queue_url
          self.index_feedback_queue_url = index_feedback_queue_url
          self.index_status_table_name = index_status_table_name
+         self.blocked_table_name = blocked_table_name
          self.ResponseQueue = ResponseQueue
          self.max_depth = max_depth
          self.request_queue_url = request_queue_url
@@ -564,6 +565,28 @@ class MasterNode:
         response = self.blocked_table.get_item(Key={'url': url})
         return 'Item' in response
 
+    def monitor_indexers_health(self):
+        """Monitor the health of indexer nodes by checking their heartbeats"""
+        logging.info("[Monitor] Checking indexer heartbeats...")
+        response = self.indexer_heartbeat_table.scan()
+        now = datetime.now(timezone.utc)
+
+        for item in response['Items']:
+            indexer_id = item['indexer_id']
+            last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
+            time_diff = (now - last_heartbeat).total_seconds()
+            
+            if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
+                logging.warning(f"[Warning] {indexer_id} missed heartbeat! Declaring as failed.")
+                self.indexer_heartbeat_table.update_item(
+                    Key={'indexer_id': indexer_id},
+                    UpdateExpression="SET #s = :s",
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={":s": "failed"}
+                )
+            else:
+                logging.info(f"[Info] {indexer_id} is alive (last seen {int(time_diff)} seconds ago).")
+
     def run_all_monitoring_tasks(self):
         """Run all monitoring tasks in sequence"""
         logging.info("[Master] Starting comprehensive monitoring cycle")
@@ -600,7 +623,7 @@ class MasterNode:
         else:
             # Dynamic scaling logic
             active_crawlers = self.count_active_crawlers()
-            min_crawlers = 2
+            min_crawlers = 1
             desired_crawlers = max(min_crawlers, min(num_messages // 10 + 1, 10))
 
             if active_crawlers < desired_crawlers:
@@ -700,6 +723,21 @@ class MasterNode:
         self.print_indexing_rate()
         print("=============================")
         
+    def shutdown(self):
+        """Handle graceful shutdown of the master node"""
+        logging.info("[Master] Initiating graceful shutdown...")
+        self.running = False
+        try:
+            # Send shutdown signals to all crawlers
+            self.send_shutdown_signal_to_crawlers()
+            
+            # Print final statistics
+            self.print_dashboard()
+            
+            logging.info("[Master] Shutdown complete")
+        except Exception as e:
+            logging.error(f"[Master] Error during shutdown: {str(e)}")
+            raise
 
 #!Option 2: Use an AMI (Amazon Machine Image)
 #!Set up one EC2 instance with everything installed and configured.
@@ -710,16 +748,16 @@ class MasterNode:
 if __name__ == "__main__":
     master = MasterNode(
         region_name='us-east-1',
-        crawl_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/CrawlQueue',
-        report_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/ReportQueue',
+        crawl_queue_url='https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue',
+        report_queue_url='https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue',
         heartbeat_table_name='CrawlerHeartbeatTable',
         task_table_name='CrawlerTaskAssignmets',
-        dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/138749495090/DeadLetterQueue',
+        dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/353176954707/DeadLetterQueue',
         blocked_table_name='BlockedUrlsTable',
-        index_feedback_queue_url = 'https://sqs.us-east-1.amazonaws.com/138749495090/FeedbackQueue',
-        request_queue_url= 'https://sqs.us-east-1.amazonaws.com/138749495090/RequestQueue',
-        ResponseQueue= 'https://sqs.us-east-1.amazonaws.com/138749495090/ResponseQueue',
-        search_queue_url = 'https://sqs.us-east-1.amazonaws.com/138749495090/SearchQueue',
+        index_feedback_queue_url = 'https://sqs.us-east-1.amazonaws.com/353176954707/FeedbackQueue',
+        request_queue_url= 'https://sqs.us-east-1.amazonaws.com/353176954707/RequestQueue',
+        ResponseQueue= 'https://sqs.us-east-1.amazonaws.com/353176954707/ResponseQueue',
+        search_queue_url = 'https://sqs.us-east-1.amazonaws.com/353176954707/SearchQueue',
         index_status_table_name = 'IndexerTaskAssignments',
         indexer_heartbeat_table_name = 'IndexerHeartbeatTable',
         max_depth=2)
