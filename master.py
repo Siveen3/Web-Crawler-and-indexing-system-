@@ -1106,16 +1106,16 @@ if __name__ == "__main__":
         max_depth=2)
 
         # Reset system (starts 2 crawlers)
-        master.reset_system_state()
+    master.reset_system_state()
 
-        # Start one more crawler
-        master.start_backup_crawler()
+    # Start one more crawler
+    master.start_backup_crawler()
 
-        # Wait for all 3 to be running and shutdown one
-        master.wait_for_crawlers_to_start(expected_count=3, timeout=300, shutdown_after_start=True)
+    # Wait for all 3 to be running and shutdown one
+    master.wait_for_crawlers_to_start(expected_count=3, timeout=300, shutdown_after_start=True)
 
-        # Then start monitoring
+    # Then start monitoring
+    master.monitor_crawl_queue()
+        logging.info("[Master] Starting comprehensive monitoring...")
         master.monitor_crawl_queue()
-            logging.info("[Master] Starting comprehensive monitoring...")
-            master.monitor_crawl_queue()
-            ####
+        ####
