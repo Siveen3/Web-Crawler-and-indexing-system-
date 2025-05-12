@@ -781,6 +781,11 @@ done
                         else:
                             logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
                             try:
+                                # Add check to ensure crawled_url is not None or empty
+                                if not crawled_url:
+                                    logging.error(f"[{crawler_id}] Cannot process failed crawl: URL is None or empty")
+                                    continue
+                                
                                 response = self.task_table.get_item(Key={'url': crawled_url})
                                 retries = response.get('Item', {}).get('retries', 0)
                                 if retries < 3:
