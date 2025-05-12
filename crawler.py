@@ -87,8 +87,12 @@ class Crawler:
         )
         # Remove from heartbeat table
         try:
-            self.heartbeat_table.delete_item(
-                Key={'crawler_id': self.crawler_id}
+            self.heartbeat_table.put_item(
+                Item={
+                    'crawler_id': self.crawler_id,
+                    'status': 'shutdown',
+                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
+                }
             )
             logging.info(f"[Crawler {self.crawler_id}] Removed from heartbeat table")
         except Exception as e:
@@ -273,14 +277,14 @@ class Crawler:
             body = json.loads(message['Body'])
             
             # Check for wake-up signal from master
-            if body.get('wake_up') and body.get('crawler_id') == self.crawler_id:
+            if body.get('status') == 'wake_up' and body.get('crawler_id') == self.crawler_id:
                 if self.is_shutdown:  # Only handle wake-up if we're in shutdown state
                     self.handle_wake_up(receipt_handle)
                     self.is_shutdown = False
                 continue
 
             # Check for shutdown signal from master
-            if body.get('shutdown') and body.get('crawler_id') == self.crawler_id:
+            if body.get('status') == 'shutdown'  and body.get('crawler_id') == self.crawler_id:
                 if not self.is_shutdown:  # Only handle shutdown if we're not already shutdown
                     self.handle_master_shutdown(receipt_handle)
                 continue
