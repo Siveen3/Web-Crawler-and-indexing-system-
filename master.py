@@ -34,6 +34,10 @@ class MasterNode:
          self.last_crawl_time = time.time()
          self.last_indexed_count = 0
          self.last_indexed_time = time.time()
+         # Add crawler control parameters
+         self.MAX_CRAWLERS = 5  # Maximum number of crawlers allowed
+         self.MIN_CRAWLERS = 2  # Minimum number of crawlers
+         self.MESSAGES_PER_CRAWLER = 20  # Number of messages per crawler for scaling
          self._init_aws_clients()
          self._init_logging()
 
@@ -634,7 +638,7 @@ class MasterNode:
         # Monitor task timeouts
         self.monitor_task_timeouts()
         
-        # Monitor crawl queue status
+        # Monitor crawl queue status with improved scaling logic
         response = self.sqs.get_queue_attributes(
             QueueUrl=self.crawl_queue_url,
             AttributeNames=['ApproximateNumberOfMessages']
@@ -645,27 +649,40 @@ class MasterNode:
         # If queue is empty, perform completion tasks
         if num_messages == 0:
             logging.info("[Master] CrawlQueue is empty. Crawling seems complete!")
-
         else:
-            # Dynamic scaling logic
+            # Improved scaling logic with better limits
             active_crawlers = self.count_active_crawlers()
-            min_crawlers = 2
-            desired_crawlers = max(min_crawlers, min(num_messages // 10 + 1, 10))
+            # Calculate desired crawlers based on queue size, but respect MAX_CRAWLERS
+            desired_crawlers = min(
+                self.MAX_CRAWLERS,
+                max(
+                    self.MIN_CRAWLERS,
+                    (num_messages // self.MESSAGES_PER_CRAWLER) + 1
+                )
+            )
 
             if active_crawlers < desired_crawlers:
-                num_to_start = desired_crawlers - active_crawlers
-                self.ensure_crawlers(num_to_start)
+                # Only start new crawlers if we're below MAX_CRAWLERS
+                if active_crawlers < self.MAX_CRAWLERS:
+                    num_to_start = min(desired_crawlers - active_crawlers, self.MAX_CRAWLERS - active_crawlers)
+                    self.ensure_crawlers(num_to_start)
+                    logging.info(f"[Scaling] Starting {num_to_start} new crawlers (active: {active_crawlers} -> {active_crawlers + num_to_start})")
+                else:
+                    logging.info(f"[Scaling] At maximum crawler limit ({self.MAX_CRAWLERS})")
             elif active_crawlers > desired_crawlers:
-                response = self.heartbeat_table.scan()
-                running_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'running']
-                # Shut down excess crawlers, but keep at least min_crawlers
-                for crawler_id in running_crawlers[desired_crawlers:]:
-                    self.send_shutdown_signal_to_crawler(crawler_id)
-                logging.info(f"[Scaling] Sent shutdown to {active_crawlers - desired_crawlers} crawlers (active: {active_crawlers} -> {desired_crawlers})")
+                # Only shut down excess crawlers if we're above MIN_CRAWLERS
+                if active_crawlers > self.MIN_CRAWLERS:
+                    num_to_shutdown = min(active_crawlers - desired_crawlers, active_crawlers - self.MIN_CRAWLERS)
+                    response = self.heartbeat_table.scan()
+                    running_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'running']
+                    for crawler_id in running_crawlers[:num_to_shutdown]:
+                        self.send_shutdown_signal_to_crawler(crawler_id)
+                    logging.info(f"[Scaling] Shutting down {num_to_shutdown} crawlers (active: {active_crawlers} -> {active_crawlers - num_to_shutdown})")
+                else:
+                    logging.info(f"[Scaling] At minimum crawler limit ({self.MIN_CRAWLERS})")
             else:
-                logging.info(f"[Scaling] No scaling action needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
+                logging.info(f"[Scaling] No scaling needed. Active crawlers: {active_crawlers}, Desired: {desired_crawlers}")
 
-      
     def count_active_crawlers(self):
         """Return the number of crawlers with status 'running'."""
         response = self.heartbeat_table.scan()
@@ -690,19 +707,34 @@ class MasterNode:
 
     def ensure_crawlers(self, num_to_start):
         """Wake up shutdown crawlers if available, otherwise start new ones."""
+        if num_to_start <= 0:
+            return
+
+        # Check if we would exceed MAX_CRAWLERS
+        current_crawlers = self.count_active_crawlers()
+        if current_crawlers + num_to_start > self.MAX_CRAWLERS:
+            num_to_start = self.MAX_CRAWLERS - current_crawlers
+            if num_to_start <= 0:
+                logging.info(f"[Scaling] Cannot start more crawlers: at maximum limit ({self.MAX_CRAWLERS})")
+                return
+
         response = self.heartbeat_table.scan()
         shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
         num_woken = 0
         
+        # First try to wake up shutdown crawlers
         for crawler_id in shutdown_crawlers[:num_to_start]:
             self.wake_up_crawler(crawler_id)
             num_woken += 1
             
+        # Only start new crawlers if we still need more
         num_to_start_new = num_to_start - num_woken
-        for _ in range(num_to_start_new):
-            self.start_backup_crawler()
-            
-        logging.info(f"[Scaling] Woke up {num_woken} shutdown crawlers, started {num_to_start_new} new crawlers.")
+        if num_to_start_new > 0:
+            logging.info(f"[Scaling] Waking up {num_woken} shutdown crawlers, starting {num_to_start_new} new crawlers")
+            for _ in range(num_to_start_new):
+                self.start_backup_crawler()
+        else:
+            logging.info(f"[Scaling] Woke up {num_woken} shutdown crawlers")
 
     def print_crawl_quality_metrics(self):
         scanned = self.task_table.scan()
@@ -885,12 +917,15 @@ class MasterNode:
             self.last_indexed_time = time.time()
             self.running = False
             
-            # Start 3 initial crawlers and wait for them to be running
-            for _ in range(3):
+            # Start exactly MIN_CRAWLERS initial crawlers
+            for _ in range(self.MIN_CRAWLERS):
                 self.start_backup_crawler()
-            logging.info("[Reset] Started 2 initial crawlers")
+            logging.info(f"[Reset] Started {self.MIN_CRAWLERS} initial crawlers")
 
-            self.wait_for_crawlers_to_start(expected_count=2, timeout=300, shutdown_after_start=True)
+            # Wait for crawlers to start
+            if not self.wait_for_crawlers_to_start(expected_count=self.MIN_CRAWLERS, timeout=300):
+                logging.error("[Reset] Failed to start initial crawlers")
+                raise Exception("Failed to start initial crawlers")
 
             self.verify_cleanup()
             
