@@ -251,15 +251,19 @@ class Crawler:
 
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
-        heartbeat()
+        last_heartbeat_time = time.time()
+        heartbeat_interval = 30  # Send heartbeat every 30 seconds
+        
+        # Register in heartbeat table when first starting up
+        try:
+            self.heartbeat()  # Call self.heartbeat() instead of just heartbeat()
+            logging.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table on startup")
+            self.is_shutdown = False  # Ensure we're not in shutdown state when starting
+        except Exception as e:
+            logging.error(f"[Crawler {self.crawler_id}] Failed to register in heartbeat table on startup: {e}")
         
         while True:
             current_time = time.time()
-            
-            # Send heartbeat periodically, regardless of URL processing
-            if current_time - last_heartbeat_time >= heartbeat_interval:
-                self.heartbeat()
-                last_heartbeat_time = current_time
             
             # Check for shutdown request
             if self.shutdown_requested:
@@ -297,12 +301,16 @@ class Crawler:
 
             # Only process URLs if not in shutdown state
             if not self.is_shutdown:
+                if current_time - last_heartbeat_time >= heartbeat_interval:
+                    self.heartbeat()
+                    last_heartbeat_time = current_time
                 url = body.get('url')
                 depth = body.get('depth', 0)
                 max_depth = body.get('max_depth', 2)  # Default to 2 if not provided
                 domain = body.get('domain')
                 assigned_at = body.get('assigned_at')
                 logging.info(f"Processing URL: {url}")
+
 
                 if not self.is_allowed_by_robots(url):
                     logging.warning(f"URL blocked by robots.txt: {url}")
