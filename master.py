@@ -916,8 +916,12 @@ class MasterNode:
             self.last_indexed_count = 0
             self.last_indexed_time = time.time()
             self.running = False
+
+            # First verify cleanup is complete
+            self.verify_cleanup()
+            logging.info("[Reset] Cleanup verification complete")
             
-            # Start exactly MIN_CRAWLERS initial crawlers
+            # Now start new crawlers after cleanup is verified
             for _ in range(self.MIN_CRAWLERS):
                 self.start_backup_crawler()
             logging.info(f"[Reset] Started {self.MIN_CRAWLERS} initial crawlers")
@@ -926,8 +930,6 @@ class MasterNode:
             if not self.wait_for_crawlers_to_start(expected_count=self.MIN_CRAWLERS, timeout=300):
                 logging.error("[Reset] Failed to start initial crawlers")
                 raise Exception("Failed to start initial crawlers")
-
-            self.verify_cleanup()
             
             logging.info("[Master] System state reset complete")
         except Exception as e:
@@ -994,7 +996,7 @@ class MasterNode:
             except Exception as e:
                 logging.error(f"[Verify] Failed to check table {table_name}: {str(e)}")
 
-        # Check EC2 instances
+        # Only check for unexpected instances, not the ones we just created
         try:
             ec2 = boto3.client('ec2', region_name=self.region_name)
             response = ec2.describe_instances(
@@ -1010,14 +1012,28 @@ class MasterNode:
                 ]
             )
             
-            instance_ids = []
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    instance_ids.append(instance['InstanceId'])
+            # Get the expected number of instances (MIN_CRAWLERS)
+            expected_instances = self.MIN_CRAWLERS
+            actual_instances = sum(1 for reservation in response['Reservations'] 
+                                 for instance in reservation['Instances'])
             
-            if instance_ids:
-                logging.warning(f"[Verify] Found {len(instance_ids)} instances still running/stopping")
-                ec2.terminate_instances(InstanceIds=instance_ids)
+            if actual_instances > expected_instances:
+                logging.warning(f"[Verify] Found {actual_instances} instances (expected {expected_instances})")
+                # Only terminate if we have more than expected
+                instance_ids = []
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        instance_ids.append(instance['InstanceId'])
+                if instance_ids:
+                    # Sort by launch time and keep the most recent ones
+                    instance_details = [(id, ec2.describe_instances(InstanceIds=[id])['Reservations'][0]['Instances'][0]['LaunchTime']) 
+                                     for id in instance_ids]
+                    instance_details.sort(key=lambda x: x[1], reverse=True)
+                    # Keep the most recent instances (up to MIN_CRAWLERS)
+                    instances_to_terminate = [id for id, _ in instance_details[expected_instances:]]
+                    if instances_to_terminate:
+                        ec2.terminate_instances(InstanceIds=instances_to_terminate)
+                        logging.info(f"[Verify] Terminated {len(instances_to_terminate)} excess instances")
         except Exception as e:
             logging.error(f"[Verify] Failed to check EC2 instances: {str(e)}")
 
