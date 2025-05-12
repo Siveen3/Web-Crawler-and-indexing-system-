@@ -1,6 +1,7 @@
 import os
 import sys
 import logging
+import boto3
 from crawler import Crawler
 
 def setup_logging():
@@ -29,8 +30,28 @@ def get_crawler_id():
 def main():
     setup_logging()
     crawler_id = get_crawler_id()
+    logging.info(f"[Startup] Generated crawler ID: {crawler_id}")
     
     try:
+        # Log environment variables (without sensitive values)
+        logging.info("[Startup] Environment variables:")
+        logging.info(f"CRAWLER_QUEUE_URL: {os.getenv('CRAWLER_QUEUE_URL')}")
+        logging.info(f"MASTER_QUEUE_URL: {os.getenv('MASTER_QUEUE_URL')}")
+        logging.info(f"INDEXER_QUEUE_URL: {os.getenv('INDEXER_QUEUE_URL')}")
+        logging.info(f"S3_BUCKET: {os.getenv('S3_BUCKET')}")
+        logging.info(f"DYNAMODB_TABLE: {os.getenv('DYNAMODB_TABLE')}")
+        logging.info(f"AWS_REGION: {os.getenv('AWS_REGION')}")
+        logging.info(f"CRAWLER_DELAY: {os.getenv('CRAWLER_DELAY')}")
+        
+        # Check AWS credentials
+        try:
+            sts = boto3.client('sts')
+            identity = sts.get_caller_identity()
+            logging.info(f"[Startup] AWS Identity: {identity['Arn']}")
+        except Exception as e:
+            logging.error(f"[Startup] AWS Credentials Error: {e}")
+            raise
+        
         crawler = Crawler(
             crawler_id=crawler_id,
             crawler_queue_url=os.getenv('CRAWLER_QUEUE_URL', 'https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue'),
@@ -42,14 +63,13 @@ def main():
             delay=int(os.getenv('CRAWLER_DELAY', '10'))
         )
         
-        logging.info(f"Starting crawler {crawler_id}")
+        logging.info(f"[Startup] Crawler object created successfully")
+        logging.info(f"[Startup] Starting crawler {crawler_id}")
         crawler.start_crawling()
     except Exception as e:
-        logging.error(f"Fatal error in crawler {crawler_id}: {str(e)}")
+        logging.error(f"[Startup] Fatal error in crawler {crawler_id}: {str(e)}")
+        logging.error(f"[Startup] Error details:", exc_info=True)
         sys.exit(1)
-
-if __name__ == "__main__":
-    main()
 
 if __name__ == "__main__":
     main()
