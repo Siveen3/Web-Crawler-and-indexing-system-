@@ -144,14 +144,14 @@ class MasterNode:
     def wake_up_crawler(self, crawler_id):
         """Wake up a crawler that's in shutdown state"""
         try:
-            wake_message = {
-                "wake_up": True,
-                "crawler_id": crawler_id
-            }
-            self.sqs.send_message(
-                QueueUrl=self.crawl_queue_url,
-                MessageBody=json.dumps(wake_message, cls=DecimalEncoder)
-            )
+        wake_message = {
+            "wake_up": True,
+            "crawler_id": crawler_id
+        }
+        self.sqs.send_message(
+            QueueUrl=self.crawl_queue_url,
+            MessageBody=json.dumps(wake_message, cls=DecimalEncoder)
+        )
             
             # Update heartbeat table to mark as starting
             self.heartbeat_table.update_item(
@@ -496,7 +496,7 @@ class MasterNode:
         try:
             # Handle both string and list results
             if isinstance(result_json_str, str):
-                result_json = json.loads(result_json_str)
+            result_json = json.loads(result_json_str)
             else:
                 result_json = result_json_str  # Already a Python object (list/dict)
                 
@@ -577,7 +577,7 @@ class MasterNode:
                     ExpressionAttributeValues={":s": "failed"}
                 )
                 if node_type == 'crawler':
-                    self.handle_failed_crawler(item)
+                self.handle_failed_crawler(item)
             else:
                 logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago).")
 
@@ -731,7 +731,7 @@ class MasterNode:
                         )
                         if response.get('Items'):
                             running_instances.append(instance_id)
-                        else:
+        else:
                             pending_instances.append(instance_id)
                     elif state == 'pending':
                         pending_instances.append(instance_id)
@@ -784,11 +784,11 @@ class MasterNode:
                 ami_id = latest_ami['ImageId']
                 
                 # Launch instance from AMI
-                response = ec2.run_instances(
+            response = ec2.run_instances(
                     ImageId=ami_id,
-                    InstanceType='t2.micro',
-                    MinCount=1,
-                    MaxCount=1,
+                InstanceType='t2.micro',
+                MinCount=1,
+                MaxCount=1,
                     TagSpecifications=[
                         {
                             'ResourceType': 'instance',
@@ -800,7 +800,7 @@ class MasterNode:
                             ]
                         }
                     ],
-                    UserData='''#!/bin/bash
+                UserData='''#!/bin/bash
                     cd /home/ubuntu
                     # Activate virtual environment
                     source crawler-venv/bin/activate
@@ -817,7 +817,7 @@ class MasterNode:
                     '''
                 )
                 
-                instance_id = response['Instances'][0]['InstanceId']
+            instance_id = response['Instances'][0]['InstanceId']
                 logging.info(f"[Instance] Starting new crawler node with instance ID: {instance_id}")
                 
                 # Wait for instance to be fully ready
@@ -990,8 +990,8 @@ class MasterNode:
                 'running': [],
                 'shutdown': []
             }
-            
-            for item in response['Items']:
+
+        for item in response['Items']:
                 crawler_id = item['crawler_id']
                 status = item.get('status', 'unknown')
                 
@@ -1088,13 +1088,13 @@ class MasterNode:
             # Put excess crawlers into shutdown state, but maintain minimum of 2 running
             num_to_shutdown = min(excess, num_running - 2)
             for crawler_id in crawler_pool['running'][:num_to_shutdown]:
-                self.send_shutdown_signal_to_crawler(crawler_id)
+                    self.send_shutdown_signal_to_crawler(crawler_id)
             
             logging.info(f"[Scaling] Put {num_to_shutdown} crawlers into shutdown state (now {num_running - num_to_shutdown} running)")
             
-        else:
+            else:
             logging.info(f"[Scaling] No scaling needed. Running crawlers: {num_running}, Desired: {desired_crawlers}")
-        
+
         # Print dashboard at the end of the monitoring cycle
         self.print_dashboard()
 
@@ -1388,7 +1388,7 @@ if __name__ == "__main__":
     
     # Wait a moment to ensure crawler pool is ready
     time.sleep(10)
-    
+
     logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
     ####
