@@ -39,19 +39,51 @@ class Crawler:
         self.s3 = boto3.client('s3', region_name=self.region)    # AWS S3 client
         self.dynamodb = boto3.resource('dynamodb', region_name=self.region)
         self.heartbeat_table = self.dynamodb.Table(self.dynamodb_table)
-        # Configure logging to show time, log level, and message
-        logging.basicConfig(filename=f'crawler_{self.crawler_id}.log', filemode='w', level=logging.INFO, 
-                            format='%(asctime)s [%(levelname)s] %(message)s')
+        
+        # Set up crawler-specific logger instead of global configuration
+        self.logger = self._setup_logger()
         
         # Handle graceful shutdown
         self.shutdown_requested = False
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
+    def _setup_logger(self):
+        """Set up a crawler-specific logger with its own file handler"""
+        # Create a custom logger
+        logger = logging.getLogger(f'crawler_{self.crawler_id}')
+        logger.setLevel(logging.INFO)
+        
+        # Prevent the logger from propagating messages to the root logger
+        logger.propagate = False
+        
+        # Remove any existing handlers to avoid duplicates if the method is called multiple times
+        if logger.handlers:
+            logger.handlers = []
+        
+        # Create a file handler
+        file_handler = logging.FileHandler(f'crawler_{self.crawler_id}.log', mode='w')
+        file_handler.setLevel(logging.INFO)
+        
+        # Create a stream handler for console output
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        # Create a logging format
+        formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # Add the handlers to the logger
+        logger.addHandler(file_handler)
+        logger.addHandler(console_handler)
+        
+        return logger
+
     def heartbeat(self):
         try:
             # Log the attempt to send heartbeat
-            logging.info(f"[Heartbeat] Attempting to send heartbeat for crawler {self.crawler_id}")
+            self.logger.info(f"[Heartbeat] Attempting to send heartbeat for crawler {self.crawler_id}")
             
             # Get current time in UTC
             current_time = datetime.now(timezone.utc)
@@ -63,7 +95,7 @@ class Crawler:
                 'status': 'running',
                 'last_heartbeat': heartbeat_time
             }
-            logging.info(f"[Heartbeat] Prepared heartbeat item: {heartbeat_item}")
+            self.logger.info(f"[Heartbeat] Prepared heartbeat item: {heartbeat_item}")
             
             # Send heartbeat to DynamoDB
             self.heartbeat_table.put_item(Item=heartbeat_item)
@@ -72,20 +104,20 @@ class Crawler:
             try:
                 response = self.heartbeat_table.get_item(Key={'crawler_id': self.crawler_id})
                 if 'Item' in response:
-                    logging.info(f"[Heartbeat] Successfully verified heartbeat for crawler {self.crawler_id}")
+                    self.logger.info(f"[Heartbeat] Successfully verified heartbeat for crawler {self.crawler_id}")
                 else:
-                    logging.error(f"[Heartbeat] Failed to verify heartbeat - no item found for crawler {self.crawler_id}")
+                    self.logger.error(f"[Heartbeat] Failed to verify heartbeat - no item found for crawler {self.crawler_id}")
             except Exception as verify_error:
-                logging.error(f"[Heartbeat] Failed to verify heartbeat: {verify_error}")
+                self.logger.error(f"[Heartbeat] Failed to verify heartbeat: {verify_error}")
             
-            logging.info(f"[Heartbeat] Successfully sent heartbeat for crawler {self.crawler_id} at {heartbeat_time}")
+            self.logger.info(f"[Heartbeat] Successfully sent heartbeat for crawler {self.crawler_id} at {heartbeat_time}")
         
         except Exception as e:
-            logging.error(f"[Heartbeat] Failed to send heartbeat for crawler {self.crawler_id}: {e}")
-            logging.error("[Heartbeat] Error details:", exc_info=True)
+            self.logger.error(f"[Heartbeat] Failed to send heartbeat for crawler {self.crawler_id}: {e}")
+            self.logger.error("[Heartbeat] Error details:", exc_info=True)
 
     def handle_shutdown(self, signum, frame):
-        logging.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
+        self.logger.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
         self.send_to_master(
             url="",
             extracted_urls=[],
@@ -98,7 +130,7 @@ class Crawler:
 
     def handle_master_shutdown(self, receipt_handle):
         # Handle shutdown signal from master node
-        logging.info(f"[Crawler {self.crawler_id}] Received shutdown signal from master")
+        self.logger.info(f"[Crawler {self.crawler_id}] Received shutdown signal from master")
         self.send_to_master(
             url="",
             extracted_urls=[],
@@ -116,22 +148,22 @@ class Crawler:
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
             )
-            logging.info(f"[Crawler {self.crawler_id}] Removed from heartbeat table")
+            self.logger.info(f"[Crawler {self.crawler_id}] Removed from heartbeat table")
         except Exception as e:
-            logging.error(f"[Crawler {self.crawler_id}] Error removing from heartbeat table: {e}")
+            self.logger.error(f"[Crawler {self.crawler_id}] Error removing from heartbeat table: {e}")
         
         # Delete the message
         self.sqs.delete_message(
             QueueUrl=self.crawler_queue_url,
             ReceiptHandle=receipt_handle
         )
-        logging.info(f"[Crawler {self.crawler_id}] Entered shutdown state")
+        self.logger.info(f"[Crawler {self.crawler_id}] Entered shutdown state")
         self.is_shutdown = True
         return True
 
     def handle_wake_up(self, receipt_handle):
         """Handle wake-up signal from master node"""
-        logging.info(f"[Crawler {self.crawler_id}] Received wake-up signal from master")
+        self.logger.info(f"[Crawler {self.crawler_id}] Received wake-up signal from master")
         # Register in heartbeat table
         try:
             self.heartbeat_table.put_item(
@@ -141,9 +173,9 @@ class Crawler:
                     'last_heartbeat': datetime.now(timezone.utc).isoformat()
                 }
             )
-            logging.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table")
+            self.logger.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table")
         except Exception as e:
-            logging.error(f"[Crawler {self.crawler_id}] Error registering in heartbeat table: {e}")
+            self.logger.error(f"[Crawler {self.crawler_id}] Error registering in heartbeat table: {e}")
             return False
         
         # Delete the message
@@ -151,7 +183,7 @@ class Crawler:
             QueueUrl=self.crawler_queue_url,
             ReceiptHandle=receipt_handle
         )
-        logging.info(f"[Crawler {self.crawler_id}] Ready to process URLs")
+        self.logger.info(f"[Crawler {self.crawler_id}] Ready to process URLs")
         return True
 
     def is_allowed_by_robots(self, url):
@@ -164,18 +196,18 @@ class Crawler:
             rp.read()
             return rp.can_fetch("*", url)   # returns True if the URL is allowed by robots.txt
         except:
-            logging.warning(f"Error reading robots.txt for URL: {url}")
+            self.logger.warning(f"Error reading robots.txt for URL: {url}")
             return True
 
     def fetch_url(self, url):
-        logging.info(f"Starting fetch attempt for URL: {url}")
+        self.logger.info(f"Starting fetch attempt for URL: {url}")
         try:
             response = requests.get(url, timeout=10)
             response.raise_for_status()
-            logging.info(f"Successfully fetched URL: {url} (Status: {response.status_code})")
+            self.logger.info(f"Successfully fetched URL: {url} (Status: {response.status_code})")
             return response.text
         except Exception as e:
-            logging.warning(f"Error fetching URL: {url} | Error: {str(e)}")
+            self.logger.warning(f"Error fetching URL: {url} | Error: {str(e)}")
             return None
 
 
@@ -208,7 +240,7 @@ class Crawler:
                 if normalized_url != base_url:
                     urls.add(normalized_url)
         urls = list(urls)
-        logging.info(f"Extracted {len(urls)} URLs from URL: {base_url}")
+        self.logger.info(f"Extracted {len(urls)} URLs from URL: {base_url}")
 
         return title, text_content, meta_description, canonical_url, urls, keywords
 
@@ -233,9 +265,9 @@ class Crawler:
                 QueueUrl=self.master_queue_url,
                 MessageBody=json.dumps(message)
             )
-            logging.info(f"Reported crawl result to master for URL: {url}")
+            self.logger.info(f"Reported crawl result to master for URL: {url}")
         except Exception as e:
-            logging.error(f"Failed to report crawl result to master for URL: {url} | Error: {e}")
+            self.logger.error(f"Failed to report crawl result to master for URL: {url} | Error: {e}")
 
     def upload_content_to_s3(self, url, title, meta_description, canonical_url, text_content, keywords):
         # Upload extracted text content to S3.        
@@ -250,10 +282,10 @@ class Crawler:
         }
         try:
             self.s3.put_object(Bucket=self.s3_bucket, Key=s3_key, Body=json.dumps(content))
-            logging.info(f"Uploaded content to S3: {s3_key}")
+            self.logger.info(f"Uploaded content to S3: {s3_key}")
             return s3_key
         except Exception as e:
-            logging.error(f"Failed to upload content to S3: {e}")
+            self.logger.error(f"Failed to upload content to S3: {e}")
             return None
 
     def send_to_indexer(self, s3_key, url):
@@ -267,9 +299,9 @@ class Crawler:
                 QueueUrl=self.indexer_queue_url,
                 MessageBody=json.dumps(message)
             )
-            logging.info(f"Sent index data for URL: {url}")
+            self.logger.info(f"Sent index data for URL: {url}")
         except Exception as e:
-            logging.error(f"Failed to send index data for URL: {url} | Error: {e}")
+            self.logger.error(f"Failed to send index data for URL: {url} | Error: {e}")
 
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
@@ -278,13 +310,13 @@ class Crawler:
         
         # Register in heartbeat table when first starting up
         try:
-            logging.info(f"[Startup] Attempting initial heartbeat registration for crawler {self.crawler_id}")
+            self.logger.info(f"[Startup] Attempting initial heartbeat registration for crawler {self.crawler_id}")
             self.heartbeat()  # Call self.heartbeat() instead of just heartbeat()
-            logging.info(f"[Startup] Successfully registered crawler {self.crawler_id} in heartbeat table")
+            self.logger.info(f"[Startup] Successfully registered crawler {self.crawler_id} in heartbeat table")
             self.is_shutdown = False  # Ensure we're not in shutdown state when starting
         except Exception as e:
-            logging.error(f"[Startup] Failed to register crawler {self.crawler_id} in heartbeat table: {e}")
-            logging.error("[Startup] Error details:", exc_info=True)
+            self.logger.error(f"[Startup] Failed to register crawler {self.crawler_id} in heartbeat table: {e}")
+            self.logger.error("[Startup] Error details:", exc_info=True)
             # Don't exit here, continue running and try to register again later
         
         while True:
@@ -292,7 +324,7 @@ class Crawler:
             
             # Check for shutdown request
             if self.shutdown_requested:
-                logging.info(f"[Crawler {self.crawler_id}] Shutdown requested. Exiting crawler before processing new messages.")
+                self.logger.info(f"[Crawler {self.crawler_id}] Shutdown requested. Exiting crawler before processing new messages.")
                 break
             
             response = self.sqs.receive_message(
@@ -303,7 +335,7 @@ class Crawler:
 
             messages = response.get('Messages', [])
             if not messages:
-                logging.info("Waiting for messages in crawler queue...")
+                self.logger.info("Waiting for messages in crawler queue...")
                 time.sleep(self.delay)
                 continue
 
@@ -331,18 +363,18 @@ class Crawler:
                         self.heartbeat()
                         last_heartbeat_time = current_time
                     except Exception as e:
-                        logging.error(f"[Heartbeat] Failed to send periodic heartbeat: {e}")
-                        logging.error("[Heartbeat] Error details:", exc_info=True)
+                        self.logger.error(f"[Heartbeat] Failed to send periodic heartbeat: {e}")
+                        self.logger.error("[Heartbeat] Error details:", exc_info=True)
                 url = body.get('url')
                 depth = body.get('depth', 0)
                 max_depth = body.get('max_depth', 2)  # Default to 2 if not provided
                 domain = body.get('domain')
                 assigned_at = body.get('assigned_at')
-                logging.info(f"Processing URL: {url}")
+                self.logger.info(f"Processing URL: {url}")
 
 
                 if not self.is_allowed_by_robots(url):
-                    logging.warning(f"URL blocked by robots.txt: {url}")
+                    self.logger.warning(f"URL blocked by robots.txt: {url}")
                     self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="skipped", error="robots.txt disallowed")
                     continue
 
@@ -350,18 +382,18 @@ class Crawler:
 
                 if html_content:
                     title, text_content, meta_description, canonical_url, extracted_urls, keywords = self.extract_content(html_content, url, domain)
-                    logging.info(f"Successfully processed URL: {url}")
+                    self.logger.info(f"Successfully processed URL: {url}")
 
                     self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, max_depth=max_depth, domain=domain, assigned_at=assigned_at)
                     s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content, keywords)
                     if s3_key:
                         self.send_to_indexer(s3_key, url)
                     else:
-                        logging.error(f"Failed to upload content to S3 for URL: {url}")
+                        self.logger.error(f"Failed to upload content to S3 for URL: {url}")
                         self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to upload to S3")
                         continue
                 else:
-                    logging.error(f"Failed to fetch URL: {url}")
+                    self.logger.error(f"Failed to fetch URL: {url}")
                     self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to fetch")
                     continue
             # Delete the processed message from queue
@@ -370,8 +402,8 @@ class Crawler:
                     QueueUrl=self.crawler_queue_url,
                     ReceiptHandle=receipt_handle
                 )
-                logging.info(f"Deleted message from crawler queue for URL: {url}")
+                self.logger.info(f"Deleted message from crawler queue for URL: {url}")
             except Exception as e:
-                logging.error(f"Failed to delete message from queue for URL {url}: {e}")
+                self.logger.error(f"Failed to delete message from queue for URL {url}: {e}")
 
             time.sleep(self.delay)  # Respect delay to avoid hammering servers
