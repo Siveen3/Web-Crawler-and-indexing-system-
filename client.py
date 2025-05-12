@@ -57,19 +57,19 @@ class Client:
                     message = messages[0]
                     body = json.loads(message['Body'])
                     # Check if this result belongs to this client
-                    if not body.get('feedback', {}) and (body.get('client_id') == self.client_id):
-                        try:
-                            # Try to delete the message
-                            self.sqs.delete_message(
-                                QueueUrl=self.response_queue_url,
-                                ReceiptHandle=message['ReceiptHandle']
-                            )
-                            return body.get('result', [])
-                        except Exception as e:
-                            # If delete fails, message will return to queue after visibility timeout
-                            logging.error(f"Failed to delete message: {str(e)}")
-                            continue
-
+                    if not body.get('feedback', {}):
+                        if (body.get('client_id') == self.client_id):
+                            try:
+                                # Try to delete the message
+                                self.sqs.delete_message(
+                                    QueueUrl=self.response_queue_url,
+                                    ReceiptHandle=message['ReceiptHandle']
+                                )
+                                return body.get('result', [])
+                            except Exception as e:
+                                # If delete fails, message will return to queue after visibility timeout
+                                logging.error(f"Failed to delete message: {str(e)}")
+                                continue
                     else:
                         # If not our message, put it back in the queue immediately
                         self.sqs.change_message_visibility(
@@ -82,7 +82,7 @@ class Client:
                 time.sleep(1)  # Add delay before retrying
         return []
 
-    def submit_seed_urls(self, seed_urls, max_depth=None, domain=None):
+    def submit_seed_urls(self, seed_urls, max_depth=2, domain=None):
         for url in seed_urls:
             message = {
                 "type": "crawl",
@@ -105,7 +105,7 @@ class Client:
             response = self.sqs.receive_message(
                 QueueUrl=self.response_queue_url,
                 MaxNumberOfMessages=1,
-                WaitTimeSeconds=10,
+                WaitTimeSeconds=2,
                 VisibilityTimeout=30
             )
             messages = response.get('Messages', [])
@@ -134,10 +134,10 @@ class Client:
                             'crawl_stats': {
                                 'total_tasks': feedback.get('total_tasks', 0),
                                 'crawled_pages': feedback.get('crawled', 0),
-                                'indexed_pages': feedback.get('total_indexed', 0),
                                 'failed_crawls': feedback.get('crawl_failed', 0),
                                 'politeness': feedback.get('politeness', 0),
-                                'crawl_coverage': feedback.get('crawl_coverage', 0)
+                                'crawl_coverage': feedback.get('crawl_coverage', 0),
+                                'total_indexed': feedback.get('total_indexed', 0)
                             },
                             'rates': {
                                 'crawl_rate': feedback.get('crawl_rate', 0),
@@ -146,16 +146,12 @@ class Client:
                         }
                     except Exception as e:
                         logging.error(f"Failed to delete message: {str(e)}")
-                        continue
                 else:
                     self.sqs.change_message_visibility(
                         QueueUrl=self.response_queue_url,
                         ReceiptHandle=message['ReceiptHandle'],
                         VisibilityTimeout=0
                     )
-                    continue
-            
-        # Return default structure if no messages received within timeout
         return {
             'error_rates': {
                 'search_error_rate': 0,
@@ -170,16 +166,17 @@ class Client:
             'crawl_stats': {
                 'total_tasks': 0,
                 'crawled_pages': 0,
-                'indexed_pages': 0,
                 'failed_crawls': 0,
                 'politeness': 0,
-                'crawl_coverage': 0
+                'crawl_coverage': 0,
+                'total_indexed': 0
             },
             'rates': {
                 'crawl_rate': 0,
                 'indexing_rate': 0
-            }
+            },
         }
+
 
 client = Client("https://sqs.us-east-1.amazonaws.com/353176954707/RequestQueue", 
                 "https://sqs.us-east-1.amazonaws.com/353176954707/ResponseQueue")
@@ -265,6 +262,7 @@ def dashboard():
     # Get monitoring information via SQS
     monitoring_data = client.receive_monitoring_data()
     return render_template('dashboard.html', stats=monitoring_data)
+
 
 if __name__ == '__main__':
     app.run(host = '0.0.0.0', port = 5000, debug=True)
