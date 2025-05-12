@@ -10,6 +10,7 @@ import urllib.robotparser
 from urllib.parse import urlparse
 import signal
 import hashlib
+import os
 
 class Crawler:
     def __init__(self, 
@@ -89,11 +90,14 @@ class Crawler:
             current_time = datetime.now(timezone.utc)
             heartbeat_time = current_time.isoformat()
             
-            # Prepare the heartbeat item
+            # Prepare the heartbeat item with more diagnostic information
             heartbeat_item = {
                 'crawler_id': self.crawler_id,
                 'status': 'running',
-                'last_heartbeat': heartbeat_time
+                'last_heartbeat': heartbeat_time,
+                'current_task_url': getattr(self, 'current_url', None),  # Store current URL being processed
+                'instance_id': os.environ.get('AWS_INSTANCE_ID', 'unknown'),  # Optional EC2 instance ID
+                'memory_usage': str(self._get_memory_usage()) + '%'  # Add memory usage
             }
             self.logger.info(f"[Heartbeat] Prepared heartbeat item: {heartbeat_item}")
             
@@ -115,6 +119,16 @@ class Crawler:
         except Exception as e:
             self.logger.error(f"[Heartbeat] Failed to send heartbeat for crawler {self.crawler_id}: {e}")
             self.logger.error("[Heartbeat] Error details:", exc_info=True)
+
+    def _get_memory_usage(self):
+        """Get the memory usage of the current process as a percentage"""
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            memory_info = process.memory_info()
+            return process.memory_percent()
+        except:
+            return 0.0  # Return 0 if psutil is not available
 
     def handle_shutdown(self, signum, frame):
         self.logger.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
@@ -164,25 +178,76 @@ class Crawler:
     def handle_wake_up(self, receipt_handle):
         """Handle wake-up signal from master node"""
         self.logger.info(f"[Crawler {self.crawler_id}] Received wake-up signal from master")
+        
+        # Only respond to wake-up if we're in shutdown state
+        if not self.is_shutdown:
+            self.logger.info(f"[Crawler {self.crawler_id}] Already running, ignoring wake-up signal")
+            self.sqs.delete_message(
+                QueueUrl=self.crawler_queue_url,
+                ReceiptHandle=receipt_handle
+            )
+            
+            # Make sure our status is correct in the heartbeat table regardless
+            try:
+                self.heartbeat_table.put_item(
+                    Item={
+                        'crawler_id': self.crawler_id,
+                        'status': 'running',
+                        'last_heartbeat': datetime.now(timezone.utc).isoformat(),
+                        'current_task_url': getattr(self, 'current_url', None),
+                        'instance_id': os.environ.get('AWS_INSTANCE_ID', 'unknown'),
+                        'memory_usage': str(self._get_memory_usage()) + '%'
+                    }
+                )
+                self.logger.info(f"[Crawler {self.crawler_id}] Updated heartbeat status to 'running'")
+            except Exception as e:
+                self.logger.error(f"[Crawler {self.crawler_id}] Error updating heartbeat status: {e}")
+            
+            return True
+        
         # Register in heartbeat table
         try:
+            self.logger.info(f"[Crawler {self.crawler_id}] Updating status from 'shutdown' to 'running'")
             self.heartbeat_table.put_item(
                 Item={
                     'crawler_id': self.crawler_id,
                     'status': 'running',
-                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
+                    'last_heartbeat': datetime.now(timezone.utc).isoformat(),
+                    'current_task_url': None,
+                    'instance_id': os.environ.get('AWS_INSTANCE_ID', 'unknown'),
+                    'memory_usage': str(self._get_memory_usage()) + '%'
                 }
             )
             self.logger.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table")
+            
+            # Send wake-up confirmation to master
+            self.send_to_master(
+                url="",
+                extracted_urls=[],
+                depth=-1,
+                max_depth=-1,
+                status="awake",
+                error=f"Crawler {self.crawler_id} successfully woken up"
+            )
+            
+            # Reset shutdown state
+            self.is_shutdown = False
         except Exception as e:
             self.logger.error(f"[Crawler {self.crawler_id}] Error registering in heartbeat table: {e}")
+            self.logger.error("[Crawler] Error details:", exc_info=True)
             return False
         
         # Delete the message
-        self.sqs.delete_message(
-            QueueUrl=self.crawler_queue_url,
-            ReceiptHandle=receipt_handle
-        )
+        try:
+            self.sqs.delete_message(
+                QueueUrl=self.crawler_queue_url,
+                ReceiptHandle=receipt_handle
+            )
+            self.logger.info(f"[Crawler {self.crawler_id}] Deleted wake-up message")
+        except Exception as e:
+            self.logger.error(f"[Crawler {self.crawler_id}] Error deleting wake-up message: {e}")
+            self.logger.error("[Crawler] Error details:", exc_info=True)
+            
         self.logger.info(f"[Crawler {self.crawler_id}] Ready to process URLs")
         return True
 
@@ -306,7 +371,8 @@ class Crawler:
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
         last_heartbeat_time = time.time()
-        heartbeat_interval = 30  # Send heartbeat every 30 seconds
+        heartbeat_interval = 20  # Send heartbeat every 20 seconds (more frequent)
+        self.current_url = None  # Initialize current URL
         
         # Register in heartbeat table when first starting up
         try:
@@ -327,83 +393,144 @@ class Crawler:
                 self.logger.info(f"[Crawler {self.crawler_id}] Shutdown requested. Exiting crawler before processing new messages.")
                 break
             
-            response = self.sqs.receive_message(
-                QueueUrl = self.crawler_queue_url,
-                MaxNumberOfMessages=1,
-                WaitTimeSeconds=10
-            )
-
-            messages = response.get('Messages', [])
-            if not messages:
-                self.logger.info("Waiting for messages in crawler queue...")
-                time.sleep(self.delay)
-                continue
-
-            message = messages[0]
-            receipt_handle = message['ReceiptHandle']
-            body = json.loads(message['Body'])
+            # More frequent heartbeats when not in shutdown state
+            if not self.is_shutdown and current_time - last_heartbeat_time >= heartbeat_interval:
+                try:
+                    self.heartbeat()
+                    last_heartbeat_time = current_time
+                except Exception as e:
+                    self.logger.error(f"[Heartbeat] Failed to send periodic heartbeat: {e}")
+                    self.logger.error("[Heartbeat] Error details:", exc_info=True)
             
-            # Check for wake-up signal from master
-            if body.get('status') == 'wake_up' and body.get('crawler_id') == self.crawler_id:
-                if self.is_shutdown:  # Only handle wake-up if we're in shutdown state
-                    self.handle_wake_up(receipt_handle)
-                    self.is_shutdown = False
-                continue
-
-            # Check for shutdown signal from master
-            if body.get('status') == 'shutdown' and body.get('crawler_id') == self.crawler_id:
-                if not self.is_shutdown:  # Only handle shutdown if we're not already shutdown
-                    self.handle_master_shutdown(receipt_handle)
-                continue
-
-            # Only process URLs if not in shutdown state
-            if not self.is_shutdown:
-                if current_time - last_heartbeat_time >= heartbeat_interval:
-                    try:
-                        self.heartbeat()
-                        last_heartbeat_time = current_time
-                    except Exception as e:
-                        self.logger.error(f"[Heartbeat] Failed to send periodic heartbeat: {e}")
-                        self.logger.error("[Heartbeat] Error details:", exc_info=True)
-                url = body.get('url')
-                depth = body.get('depth', 0)
-                max_depth = body.get('max_depth', 2)  # Default to 2 if not provided
-                domain = body.get('domain')
-                assigned_at = body.get('assigned_at')
-                self.logger.info(f"Processing URL: {url}")
-
-
-                if not self.is_allowed_by_robots(url):
-                    self.logger.warning(f"URL blocked by robots.txt: {url}")
-                    self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="skipped", error="robots.txt disallowed")
-                    continue
-
-                html_content = self.fetch_url(url)
-
-                if html_content:
-                    title, text_content, meta_description, canonical_url, extracted_urls, keywords = self.extract_content(html_content, url, domain)
-                    self.logger.info(f"Successfully processed URL: {url}")
-
-                    self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, max_depth=max_depth, domain=domain, assigned_at=assigned_at)
-                    s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content, keywords)
-                    if s3_key:
-                        self.send_to_indexer(s3_key, url)
-                    else:
-                        self.logger.error(f"Failed to upload content to S3 for URL: {url}")
-                        self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to upload to S3")
-                        continue
-                else:
-                    self.logger.error(f"Failed to fetch URL: {url}")
-                    self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to fetch")
-                    continue
-            # Delete the processed message from queue
+            # Always check for wake-up/shutdown signals, even when in shutdown state
             try:
-                self.sqs.delete_message(
-                    QueueUrl=self.crawler_queue_url,
-                    ReceiptHandle=receipt_handle
+                response = self.sqs.receive_message(
+                    QueueUrl = self.crawler_queue_url,
+                    MaxNumberOfMessages=1,
+                    WaitTimeSeconds=10,
+                    MessageAttributeNames=['MessageType']  # Also check message attributes
                 )
-                self.logger.info(f"Deleted message from crawler queue for URL: {url}")
-            except Exception as e:
-                self.logger.error(f"Failed to delete message from queue for URL {url}: {e}")
+                
+                messages = response.get('Messages', [])
+                if not messages:
+                    # Only log when not in shutdown state
+                    if not self.is_shutdown:
+                        self.logger.info("Waiting for messages in crawler queue...")
+                    self.current_url = None  # Clear current URL when idle
+                    
+                    # Shorter sleep when in shutdown to be more responsive to wake-up signals
+                    time.sleep(self.delay if not self.is_shutdown else 5)
+                    continue
+                
+                message = messages[0]
+                receipt_handle = message['ReceiptHandle']
+                
+                # Check if this is a control message (wake-up or shutdown)
+                is_control_message = False
+                
+                try:
+                    body = json.loads(message['Body'])
+                    
+                    # Check for wake-up message
+                    if body.get('status') == 'wake_up' and body.get('crawler_id') == self.crawler_id:
+                        self.logger.info(f"[Control] Received wake-up signal")
+                        is_control_message = True
+                        if self.is_shutdown:  # Only handle wake-up if we're in shutdown state
+                            self.handle_wake_up(receipt_handle)
+                            continue
+                        else:
+                            # Already running, just delete the message
+                            self.logger.info(f"[Control] Already running, ignoring wake-up signal")
+                            self.sqs.delete_message(
+                                QueueUrl=self.crawler_queue_url,
+                                ReceiptHandle=receipt_handle
+                            )
+                            continue
+                    
+                    # Check for shutdown message
+                    if body.get('status') == 'shutdown' and body.get('crawler_id') == self.crawler_id:
+                        self.logger.info(f"[Control] Received shutdown signal")
+                        is_control_message = True
+                        if not self.is_shutdown:  # Only handle shutdown if we're not already shutdown
+                            self.handle_master_shutdown(receipt_handle)
+                            continue
+                        else:
+                            # Already shutdown, just delete the message
+                            self.logger.info(f"[Control] Already in shutdown state, ignoring shutdown signal")
+                            self.sqs.delete_message(
+                                QueueUrl=self.crawler_queue_url,
+                                ReceiptHandle=receipt_handle
+                            )
+                            continue
+                except Exception as e:
+                    self.logger.error(f"[Control] Error processing message: {str(e)}")
+                    # Continue to normal message processing in case it's not a control message
+                
+                # Don't process URLs if in shutdown state or if this was a control message
+                if self.is_shutdown or is_control_message:
+                    # If it reached here and it's a control message, it means we couldn't properly
+                    # process it, so try to delete it and continue
+                    if is_control_message:
+                        try:
+                            self.sqs.delete_message(
+                                QueueUrl=self.crawler_queue_url,
+                                ReceiptHandle=receipt_handle
+                            )
+                            self.logger.info(f"[Control] Deleted unprocessed control message")
+                        except Exception as e:
+                            self.logger.error(f"[Control] Error deleting message: {str(e)}")
+                    continue
+                
+                # Process regular URL message
+                try:
+                    body = json.loads(message['Body'])
+                    url = body.get('url')
+                    self.current_url = url  # Track current URL for heartbeat
+                    depth = body.get('depth', 0)
+                    max_depth = body.get('max_depth', 2)  # Default to 2 if not provided
+                    domain = body.get('domain')
+                    assigned_at = body.get('assigned_at')
+                    self.logger.info(f"Processing URL: {url}")
 
-            time.sleep(self.delay)  # Respect delay to avoid hammering servers
+                    if not self.is_allowed_by_robots(url):
+                        self.logger.warning(f"URL blocked by robots.txt: {url}")
+                        self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="skipped", error="robots.txt disallowed")
+                        continue
+
+                    html_content = self.fetch_url(url)
+
+                    if html_content:
+                        title, text_content, meta_description, canonical_url, extracted_urls, keywords = self.extract_content(html_content, url, domain)
+                        self.logger.info(f"Successfully processed URL: {url}")
+
+                        self.send_to_master(url=url, status="success", extracted_urls=extracted_urls, depth=depth, max_depth=max_depth, domain=domain, assigned_at=assigned_at)
+                        s3_key = self.upload_content_to_s3(url, title, meta_description, canonical_url, text_content, keywords)
+                        if s3_key:
+                            self.send_to_indexer(s3_key, url)
+                        else:
+                            self.logger.error(f"Failed to upload content to S3 for URL: {url}")
+                            self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to upload to S3")
+                            continue
+                    else:
+                        self.logger.error(f"Failed to fetch URL: {url}")
+                        self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to fetch")
+                        continue
+                except Exception as e:
+                    self.logger.error(f"[Process] Error processing URL message: {str(e)}")
+                    # Try to delete the message to avoid it getting stuck
+                    try:
+                        self.sqs.delete_message(
+                            QueueUrl=self.crawler_queue_url,
+                            ReceiptHandle=receipt_handle
+                        )
+                    except:
+                        pass  # Ignore if we can't delete it
+                
+                # Reset current URL after processing
+                self.current_url = None
+            except Exception as e:
+                self.logger.error(f"[Error] Unexpected error in message processing loop: {str(e)}")
+                self.logger.error("[Error] Error details:", exc_info=True)
+                time.sleep(5)  # Sleep briefly before trying again
+            
+            time.sleep(self.delay if not self.is_shutdown else 5)  # Shorter sleep when shutdown
