@@ -493,15 +493,16 @@ class MasterNode:
                         crawled_url = body.get('url', '')
                         extracted_urls = body.get('extracted_urls', [])
                         depth = body.get('depth') or 0
+                        max_depth = body.get('max_depth', self.max_depth)  # Get max_depth from message or use default
                         status = body.get('status', 'unknown')
                         error = body.get('error', '')
                         domain = body.get('domain', None)
                         
                         if status == 'success':
                             logging.info(f"[{crawler_id}] Successfully crawled: {crawled_url} at depth {depth}")
-                            if depth < self.max_depth:
+                            if depth < max_depth:  # Use the max_depth from message
                                 for url in extracted_urls:
-                                    self.send_url_to_crawl_queue(url, domain, depth=depth+1, max_depth= max_depth)
+                                    self.send_url_to_crawl_queue(url, domain, depth=depth+1, max_depth=max_depth)
                             self.task_table.update_item(
                                 Key={'url': crawled_url},
                                 UpdateExpression="SET #s = :s",
@@ -523,13 +524,20 @@ class MasterNode:
                             )
                         elif status == 'shutdown':
                             logging.info(f"[{crawler_id}] {error}")
+                            # Update crawler status in heartbeat table
+                            self.heartbeat_table.update_item(
+                                Key={'crawler_id': crawler_id},
+                                UpdateExpression="SET #s = :s",
+                                ExpressionAttributeNames={"#s": "status"},
+                                ExpressionAttributeValues={":s": "shutdown"}
+                            )
                         else:
                             logging.warning(f"[{crawler_id}] Failed crawling: {crawled_url} Reason: {error}")
                             try:
                                 response = self.task_table.get_item(Key={'url': crawled_url})
                                 retries = response.get('Item', {}).get('retries', 0)
                                 if retries < 3:
-                                    self.send_url_to_crawl_queue(crawled_url, domain, depth=depth, max_depth= max_depth)
+                                    self.send_url_to_crawl_queue(crawled_url, domain, depth=depth, max_depth=max_depth)
                                     self.task_table.update_item(
                                         Key={'url': crawled_url},
                                         UpdateExpression="SET retries = :r, assigned_at = :t",
@@ -1085,10 +1093,16 @@ class MasterNode:
                         # Shutdown the first running crawler
                         crawler_to_shutdown = running_crawlers[0]
                         crawler_id = crawler_to_shutdown['crawler_id']
-                        logging.info(f"[Startup] Shutting down crawler {crawler_id} after successful start")
+                        logging.info(f"[Startup] Shutting down crawler {crawler_id}")
                         
-                        # Also send shutdown signal to the crawler
+                        # Send shutdown signal and update status
                         self.send_shutdown_signal_to_crawler(crawler_id)
+                        self.heartbeat_table.update_item(
+                            Key={'crawler_id': crawler_id},
+                            UpdateExpression="SET #s = :s",
+                            ExpressionAttributeNames={"#s": "status"},
+                            ExpressionAttributeValues={":s": "shutdown"}
+                        )
                 
                 return True
                 
@@ -1127,8 +1141,29 @@ if __name__ == "__main__":
     # Start one more crawler
     master.start_backup_crawler()
 
-    # Wait for all 3 to be running and shutdown one
-    master.wait_for_crawlers_to_start(expected_count=3, timeout=300, shutdown_after_start=True)
+    # Wait for all 3 to be running
+    if master.wait_for_crawlers_to_start(expected_count=3, timeout=300):
+        # Get the heartbeat table to find crawler IDs
+        heartbeat_response = master.heartbeat_table.scan()
+        running_crawlers = [item for item in heartbeat_response['Items'] 
+                          if item.get('status') == 'running']
+        
+        if running_crawlers:
+            # Shutdown the first running crawler
+            crawler_to_shutdown = running_crawlers[0]
+            crawler_id = crawler_to_shutdown['crawler_id']
+            logging.info(f"[Startup] Shutting down crawler {crawler_id}")
+            
+            # Send shutdown signal and update status
+            master.send_shutdown_signal_to_crawler(crawler_id)
+            master.heartbeat_table.update_item(
+                Key={'crawler_id': crawler_id},
+                UpdateExpression="SET #s = :s",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": "shutdown"}
+            )
+    else:
+        logging.error("[Startup] Failed to start all crawlers")
 
     # Then start monitoring
     logging.info("[Master] Starting comprehensive monitoring...")
