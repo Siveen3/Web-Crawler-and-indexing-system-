@@ -409,9 +409,40 @@ class MasterNode:
 
     def start_backup_crawler(self):
         """Start a new crawler instance from the AMI"""
+        logging.info("[Backup] Starting new crawler instance creation process")
         ec2 = boto3.client('ec2', region_name=self.region_name)
         try:
+            # First, find an existing crawler instance to copy settings from
+            logging.info("[Backup] Looking for existing crawler instance to copy settings")
+            try:
+                existing_crawler = None
+                response = ec2.describe_instances(
+                    Filters=[
+                        {
+                            'Name': 'tag:Name',
+                            'Values': ['CrawlerNode']
+                        },
+                        {
+                            'Name': 'instance-state-name',
+                            'Values': ['running', 'pending', 'stopped']
+                        }
+                    ]
+                )
+                
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        # Found an existing crawler to copy settings from
+                        existing_crawler = instance
+                        logging.info(f"[Backup] Found existing crawler instance {instance['InstanceId']} to copy settings from")
+                        break
+                    if existing_crawler:
+                        break
+            except Exception as e:
+                logging.warning(f"[Backup] Error looking for existing crawler: {e}")
+                existing_crawler = None
+            
             # Get the latest AMI ID for our crawler
+            logging.info("[Backup] Searching for crawler AMI")
             response = ec2.describe_images(
                 Filters=[
                     {
@@ -422,82 +453,24 @@ class MasterNode:
             )
             
             if not response['Images']:
-                logging.error("[Recovery] No crawler AMI found!")
+                logging.error("[Backup] No crawler AMI found!")
                 return
-                
+            
             # Sort by creation date and get the latest
             latest_ami = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)[0]
             ami_id = latest_ami['ImageId']
+            logging.info(f"[Backup] Using AMI: {ami_id} ({latest_ami['Name']})")
             
             # Generate a unique ID for this crawler
             crawler_id = f"crawler-{str(uuid.uuid4())[:8]}"
             
-            # Fixed UserData script with proper paths and improved initialization
-            user_data_script = f"""#!/bin/bash
-# Navigate to the home directory
-cd ~
-# Log startup for debugging
-echo "Starting crawler initialization: $(date)" > startup.log
-
-# Activate virtual environment if it exists in current directory
-if [ -d "crawler-venv" ]; then
-    source crawler-venv/bin/activate
-    echo "Activated virtual environment at ~/crawler-venv" >> startup.log
-elif [ -d "/home/ubuntu/crawler-venv" ]; then
-    source /home/ubuntu/crawler-venv/bin/activate
-    echo "Activated virtual environment at /home/ubuntu/crawler-venv" >> startup.log
-else
-    echo "WARNING: crawler-venv not found in expected locations" >> startup.log
-fi
-
-# Verify Python and boto3 are available
-which python >> startup.log
-python -c "import boto3; print('boto3 version:', boto3.__version__)" >> startup.log 2>&1
-
-# Set environment variables with unique crawler ID
-export CRAWLER_ID="{crawler_id}"
-export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
-export MASTER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue"
-export INDEXER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/IndexQueue"
-export S3_BUCKET="crawler-indexer-buckets"
-export DYNAMODB_TABLE="CrawlerHeartbeatTable"
-export AWS_REGION="us-east-1"
-export CRAWLER_DELAY="10"
-
-# Find crawler_object.py
-if [ -f "crawler_object.py" ]; then
-    CRAWLER_SCRIPT="./crawler_object.py"
-    echo "Found crawler_object.py in current directory" >> startup.log
-elif [ -f "/home/ubuntu/crawler_object.py" ]; then
-    CRAWLER_SCRIPT="/home/ubuntu/crawler_object.py"
-    echo "Found crawler_object.py in /home/ubuntu" >> startup.log
-else
-    echo "ERROR: crawler_object.py not found in expected locations" >> startup.log
-    find ~ -name "crawler_object.py" >> startup.log 2>&1
-    exit 1
-fi
-
-# Run the crawler
-echo "Starting crawler with command: python $CRAWLER_SCRIPT" >> startup.log
-python $CRAWLER_SCRIPT > ~/crawler_{crawler_id}.log 2>&1 &
-
-# Add a hook to ensure crawler is running
-sleep 10
-if pgrep -f "python.*crawler_object.py"; then
-    echo "Crawler is running successfully" >> startup.log
-else
-    echo "WARNING: Crawler does not appear to be running after 10 seconds" >> startup.log
-    ps aux | grep python >> startup.log
-fi
-"""
-            
-            # Launch instance from AMI
-            response = ec2.run_instances(
-                ImageId=ami_id,
-                InstanceType='t2.micro',
-                MinCount=1,
-                MaxCount=1,
-                TagSpecifications=[
+            # Prepare instance launch parameters, copying from existing instance if available
+            launch_params = {
+                'ImageId': ami_id,
+                'InstanceType': 't2.micro',
+                'MinCount': 1,
+                'MaxCount': 1,
+                'TagSpecifications': [
                     {
                         'ResourceType': 'instance',
                         'Tags': [
@@ -511,20 +484,266 @@ fi
                             }
                         ]
                     }
-                ],
-                UserData=user_data_script
-            )
+                ]
+            }
+            
+            # If we found an existing crawler, copy its settings
+            if existing_crawler:
+                # Copy security groups
+                if 'SecurityGroups' in existing_crawler:
+                    sg_ids = [sg['GroupId'] for sg in existing_crawler['SecurityGroups']]
+                    launch_params['SecurityGroupIds'] = sg_ids
+                    logging.info(f"[Backup] Using security groups: {sg_ids}")
+                
+                # Copy subnet
+                if 'SubnetId' in existing_crawler:
+                    launch_params['SubnetId'] = existing_crawler['SubnetId']
+                    logging.info(f"[Backup] Using subnet: {existing_crawler['SubnetId']}")
+                
+                # Copy IAM role if it exists
+                if 'IamInstanceProfile' in existing_crawler and existing_crawler['IamInstanceProfile']:
+                    role_arn = existing_crawler['IamInstanceProfile']['Arn']
+                    role_name = role_arn.split('/')[-1]
+                    launch_params['IamInstanceProfile'] = {'Name': role_name}
+                    logging.info(f"[Backup] Using IAM role: {role_name}")
+                else:
+                    logging.warning("[Backup] No IAM role found on existing instance. AWS service access may fail.")
+                    # Try to find a suitable role
+                    try:
+                        iam = boto3.client('iam', region_name=self.region_name)
+                        roles = iam.list_roles()
+                        for role in roles['Roles']:
+                            role_name = role['RoleName']
+                            if 'EC2' in role_name and ('Crawler' in role_name or 'DynamoDB' in role_name):
+                                launch_params['IamInstanceProfile'] = {'Name': role_name}
+                                logging.info(f"[Backup] Found likely IAM role: {role_name}")
+                                break
+                    except Exception as e:
+                        logging.error(f"[Backup] Error searching for IAM roles: {e}")
+            else:
+                logging.warning("[Backup] No existing crawler found to copy settings from. Using defaults.")
+                # Set default security group (default VPC security group)
+                try:
+                    # Get default VPC
+                    ec2_resource = boto3.resource('ec2', region_name=self.region_name)
+                    default_vpc = list(ec2_resource.vpcs.filter(Filters=[{'Name': 'isDefault', 'Values': ['true']}]))[0]
+                    # Get default security group
+                    default_sg = list(default_vpc.security_groups.filter(
+                        Filters=[{'Name': 'group-name', 'Values': ['default']}]))[0]
+                    launch_params['SecurityGroupIds'] = [default_sg.id]
+                    logging.info(f"[Backup] Using default security group: {default_sg.id}")
+                    
+                    # Get a public subnet
+                    public_subnets = []
+                    for subnet in default_vpc.subnets.all():
+                        # Check if subnet has route to internet gateway
+                        for route in subnet.route_table.routes:
+                            if route.gateway_id and route.gateway_id.startswith('igw-'):
+                                public_subnets.append(subnet.id)
+                                break
+                
+                    if public_subnets:
+                        launch_params['SubnetId'] = public_subnets[0]
+                        logging.info(f"[Backup] Using public subnet: {public_subnets[0]}")
+                except Exception as e:
+                    logging.error(f"[Backup] Error setting up default network: {e}")
+                
+                # Try to find or create a suitable IAM role
+                try:
+                    iam = boto3.client('iam', region_name=self.region_name)
+                    # Look for existing roles first
+                    roles = iam.list_roles()
+                    crawler_role = None
+                    for role in roles['Roles']:
+                        if 'CrawlerRole' in role['RoleName'] or ('EC2' in role['RoleName'] and 'DynamoDB' in role['RoleName']):
+                            crawler_role = role['RoleName']
+                            break
+                    
+                    if crawler_role:
+                        launch_params['IamInstanceProfile'] = {'Name': crawler_role}
+                        logging.info(f"[Backup] Using existing IAM role: {crawler_role}")
+                    else:
+                        logging.error("[Backup] No suitable IAM role found. Crawler WILL NOT have AWS service access!")
+                        logging.error("[Backup] Create an IAM role with DynamoDB, SQS and S3 access and name it 'CrawlerRole'")
+                except Exception as e:
+                    logging.error(f"[Backup] Error handling IAM roles: {e}")
+            
+            # Enhanced UserData script with better error handling and diagnostics
+            user_data_script = f"""#!/bin/bash
+# Navigate to the home directory
+cd ~
+# Log startup for debugging
+echo "===== CRAWLER STARTUP: {crawler_id} =====" > startup.log
+echo "Starting crawler initialization: $(date)" >> startup.log
+echo "Instance metadata:" >> startup.log
+curl -s http://169.254.169.254/latest/meta-data/instance-id >> startup.log
+echo "" >> startup.log
+
+# Check for network connectivity
+echo "Testing internet connectivity..." >> startup.log
+if ping -c 3 amazon.com >> startup.log 2>&1; then
+    echo "Internet connectivity: OK" >> startup.log
+else
+    echo "WARNING: Internet connectivity check failed" >> startup.log
+fi
+
+# Check for AWS API connectivity
+echo "Testing AWS connectivity..." >> startup.log
+if curl -s https://dynamodb.us-east-1.amazonaws.com >> /dev/null 2>&1; then
+    echo "AWS API connectivity: OK" >> startup.log
+else
+    echo "WARNING: AWS API connectivity check failed" >> startup.log
+fi
+
+# Check for IAM role
+echo "Checking for IAM role..." >> startup.log
+curl -s http://169.254.169.254/latest/meta-data/iam/security-credentials/ >> startup.log 2>&1
+
+# Activate virtual environment if it exists in current directory
+if [ -d "crawler-venv" ]; then
+    source crawler-venv/bin/activate
+    echo "Activated virtual environment at ~/crawler-venv" >> startup.log
+elif [ -d "/home/ubuntu/crawler-venv" ]; then
+    source /home/ubuntu/crawler-venv/bin/activate
+    echo "Activated virtual environment at /home/ubuntu/crawler-venv" >> startup.log
+else
+    echo "WARNING: crawler-venv not found in expected locations" >> startup.log
+    if command -v python3 -m venv &> /dev/null; then
+        echo "Creating new virtual environment" >> startup.log
+        python3 -m venv crawler-venv
+        source crawler-venv/bin/activate
+        pip install boto3 requests beautifulsoup4 urllib3
+    else
+        echo "CRITICAL: Cannot create virtual environment" >> startup.log
+    fi
+fi
+
+# Verify Python and boto3 are available
+echo "Python version:" >> startup.log
+python --version >> startup.log 2>&1
+echo "Installed packages:" >> startup.log
+pip list >> startup.log 2>&1
+
+# Set environment variables with unique crawler ID
+export CRAWLER_ID="{crawler_id}"
+export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
+export MASTER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue"
+export INDEXER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/IndexQueue"
+export S3_BUCKET="crawler-indexer-buckets"
+export DYNAMODB_TABLE="CrawlerHeartbeatTable"
+export AWS_REGION="us-east-1"
+export CRAWLER_DELAY="10"
+
+# Find crawler_object.py
+echo "Searching for crawler_object.py..." >> startup.log
+if [ -f "crawler_object.py" ]; then
+    CRAWLER_SCRIPT="./crawler_object.py"
+    echo "Found crawler_object.py in current directory" >> startup.log
+elif [ -f "/home/ubuntu/crawler_object.py" ]; then
+    CRAWLER_SCRIPT="/home/ubuntu/crawler_object.py"
+    echo "Found crawler_object.py in /home/ubuntu" >> startup.log
+else
+    echo "ERROR: crawler_object.py not found in expected locations" >> startup.log
+    echo "Searching for it..." >> startup.log
+    find ~ -name "crawler_object.py" >> startup.log 2>&1
+    exit 1
+fi
+
+# Verify crawler.py exists too
+if [ -f "crawler.py" ]; then
+    echo "Found crawler.py in current directory" >> startup.log
+elif [ -f "/home/ubuntu/crawler.py" ]; then
+    echo "Found crawler.py in /home/ubuntu" >> startup.log
+else
+    echo "ERROR: crawler.py not found in expected locations" >> startup.log
+    find ~ -name "crawler.py" >> startup.log 2>&1
+    exit 1
+fi
+
+# Test AWS credentials and DynamoDB access before starting crawler
+echo "Testing AWS credentials and DynamoDB access..." >> startup.log
+python -c "
+import boto3
+import datetime
+try:
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    table = dynamodb.Table('CrawlerHeartbeatTable')
+    response = table.put_item(Item={
+        'crawler_id': 'test-{crawler_id}',
+        'status': 'test',
+        'last_heartbeat': datetime.datetime.now().isoformat()
+    })
+    print('DynamoDB access test: SUCCESS')
+except Exception as e:
+    print('DynamoDB access test: FAILED - ' + str(e))
+" >> startup.log 2>&1
+
+# Run the crawler
+echo "Starting crawler with command: python $CRAWLER_SCRIPT" >> startup.log
+python $CRAWLER_SCRIPT > ~/crawler_{crawler_id}.log 2>&1 &
+CRAWLER_PID=$!
+echo "Crawler PID: $CRAWLER_PID" >> startup.log
+
+# Add a hook to ensure crawler is running
+sleep 10
+if ps -p $CRAWLER_PID > /dev/null; then
+    echo "Crawler is running successfully (PID: $CRAWLER_PID)" >> startup.log
+else
+    echo "WARNING: Crawler process not found after 10 seconds" >> startup.log
+    echo "Checking for other Python processes:" >> startup.log
+    ps aux | grep python >> startup.log
+    
+    # Try to diagnose and fix common issues
+    echo "Trying to restart crawler..." >> startup.log
+    python $CRAWLER_SCRIPT > ~/crawler_{crawler_id}_retry.log 2>&1 &
+fi
+
+# Add a watchdog to restart crawler if it fails
+echo "Setting up watchdog to monitor crawler process" >> startup.log
+(
+while true; do
+    sleep 60
+    if ! ps -p $CRAWLER_PID > /dev/null; then
+        echo "$(date) - Crawler process died, restarting..." >> ~/watchdog.log
+        python $CRAWLER_SCRIPT > ~/crawler_{crawler_id}_restarted.log 2>&1 &
+        CRAWLER_PID=$!
+        echo "New crawler PID: $CRAWLER_PID" >> ~/watchdog.log
+    fi
+done
+) &
+"""
+            
+            # Add the UserData script to the launch parameters
+            launch_params['UserData'] = user_data_script
+            
+            # Launch the instance with all the configured parameters
+            logging.info(f"[Backup] Launching new crawler instance with parameters: {launch_params}")
+            response = ec2.run_instances(**launch_params)
             
             instance_id = response['Instances'][0]['InstanceId']
-            logging.info(f"[Recovery] Starting backup crawler node {crawler_id} with instance ID: {instance_id}")
+            logging.info(f"[Backup] Started crawler node {crawler_id} with instance ID: {instance_id}")
             
             # Wait for the instance to be running
-            waiter = ec2.get_waiter('instance_running')
-            waiter.wait(InstanceIds=[instance_id])
-            logging.info(f"[Recovery] Backup crawler node {crawler_id} (instance {instance_id}) is now running.")
+            try:
+                logging.info(f"[Backup] Waiting for instance {instance_id} to reach running state")
+                waiter = ec2.get_waiter('instance_running')
+                waiter.wait(InstanceIds=[instance_id])
+                logging.info(f"[Backup] Instance {instance_id} is now running")
+                
+                # Get the public IP for SSH access
+                instance_info = ec2.describe_instances(InstanceIds=[instance_id])
+                if 'PublicIpAddress' in instance_info['Reservations'][0]['Instances'][0]:
+                    public_ip = instance_info['Reservations'][0]['Instances'][0]['PublicIpAddress']
+                    logging.info(f"[Backup] Instance public IP: {public_ip} (for SSH access)")
+            except Exception as e:
+                logging.error(f"[Backup] Error waiting for instance: {e}")
+            
+            logging.info(f"[Backup] Crawler node {crawler_id} (instance {instance_id}) startup complete.")
+            return instance_id
             
         except Exception as e:
-            logging.error(f"[Recovery] Failed to start backup crawler: {e}")
+            logging.error(f"[Recovery] Failed to start backup crawler: {e}", exc_info=True)
+            return None
 
     def monitor_crawler_reports(self):
         logging.info("[Monitor] Checking crawler reports...")
