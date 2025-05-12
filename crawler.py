@@ -50,17 +50,39 @@ class Crawler:
 
     def heartbeat(self):
         try:
-            self.heartbeat_table.put_item(
-                Item={
-                    'crawler_id': self.crawler_id,
-                    'status': 'running',
-                    'last_heartbeat': datetime.now(timezone.utc).isoformat()
-                }
-            )
-            logging.info(f"Heartbeat sent for crawler {self.crawler_id} at {datetime.now()}")
+            # Log the attempt to send heartbeat
+            logging.info(f"[Heartbeat] Attempting to send heartbeat for crawler {self.crawler_id}")
+            
+            # Get current time in UTC
+            current_time = datetime.now(timezone.utc)
+            heartbeat_time = current_time.isoformat()
+            
+            # Prepare the heartbeat item
+            heartbeat_item = {
+                'crawler_id': self.crawler_id,
+                'status': 'running',
+                'last_heartbeat': heartbeat_time
+            }
+            logging.info(f"[Heartbeat] Prepared heartbeat item: {heartbeat_item}")
+            
+            # Send heartbeat to DynamoDB
+            self.heartbeat_table.put_item(Item=heartbeat_item)
+            
+            # Verify the heartbeat was recorded
+            try:
+                response = self.heartbeat_table.get_item(Key={'crawler_id': self.crawler_id})
+                if 'Item' in response:
+                    logging.info(f"[Heartbeat] Successfully verified heartbeat for crawler {self.crawler_id}")
+                else:
+                    logging.error(f"[Heartbeat] Failed to verify heartbeat - no item found for crawler {self.crawler_id}")
+            except Exception as verify_error:
+                logging.error(f"[Heartbeat] Failed to verify heartbeat: {verify_error}")
+            
+            logging.info(f"[Heartbeat] Successfully sent heartbeat for crawler {self.crawler_id} at {heartbeat_time}")
         
         except Exception as e:
-            logging.error(f"Failed to send heartbeat: {e}")    
+            logging.error(f"[Heartbeat] Failed to send heartbeat for crawler {self.crawler_id}: {e}")
+            logging.error("[Heartbeat] Error details:", exc_info=True)
 
     def handle_shutdown(self, signum, frame):
         logging.warning(f"Received shutdown signal (signal {signum}). Preparing to stop...")
@@ -256,18 +278,21 @@ class Crawler:
         
         # Register in heartbeat table when first starting up
         try:
+            logging.info(f"[Startup] Attempting initial heartbeat registration for crawler {self.crawler_id}")
             self.heartbeat()  # Call self.heartbeat() instead of just heartbeat()
-            logging.info(f"[Crawler {self.crawler_id}] Registered in heartbeat table on startup")
+            logging.info(f"[Startup] Successfully registered crawler {self.crawler_id} in heartbeat table")
             self.is_shutdown = False  # Ensure we're not in shutdown state when starting
         except Exception as e:
-            logging.error(f"[Crawler {self.crawler_id}] Failed to register in heartbeat table on startup: {e}")
+            logging.error(f"[Startup] Failed to register crawler {self.crawler_id} in heartbeat table: {e}")
+            logging.error("[Startup] Error details:", exc_info=True)
+            # Don't exit here, continue running and try to register again later
         
         while True:
             current_time = time.time()
             
             # Check for shutdown request
             if self.shutdown_requested:
-                logging.info("Shutdown requested. Exiting crawler before processing new messages.")
+                logging.info(f"[Crawler {self.crawler_id}] Shutdown requested. Exiting crawler before processing new messages.")
                 break
             
             response = self.sqs.receive_message(
@@ -302,8 +327,12 @@ class Crawler:
             # Only process URLs if not in shutdown state
             if not self.is_shutdown:
                 if current_time - last_heartbeat_time >= heartbeat_interval:
-                    self.heartbeat()
-                    last_heartbeat_time = current_time
+                    try:
+                        self.heartbeat()
+                        last_heartbeat_time = current_time
+                    except Exception as e:
+                        logging.error(f"[Heartbeat] Failed to send periodic heartbeat: {e}")
+                        logging.error("[Heartbeat] Error details:", exc_info=True)
                 url = body.get('url')
                 depth = body.get('depth', 0)
                 max_depth = body.get('max_depth', 2)  # Default to 2 if not provided
