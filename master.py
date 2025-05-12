@@ -524,29 +524,18 @@ class MasterNode:
                 logging.warning("[Backup] No existing crawler found to copy settings from. Using defaults.")
                 # Set default security group (default VPC security group)
                 try:
-                    # Get default VPC
-                    ec2_resource = boto3.resource('ec2', region_name=self.region_name)
-                    default_vpc = list(ec2_resource.vpcs.filter(Filters=[{'Name': 'isDefault', 'Values': ['true']}]))[0]
-                    # Get default security group
-                    default_sg = list(default_vpc.security_groups.filter(
-                        Filters=[{'Name': 'group-name', 'Values': ['default']}]))[0]
-                    launch_params['SecurityGroupIds'] = [default_sg.id]
-                    logging.info(f"[Backup] Using default security group: {default_sg.id}")
+                    # Use the specific security group and subnet values provided
+                    launch_params['SecurityGroupIds'] = ['sg-0790ac0a83cfc4b55']
+                    logging.info(f"[Backup] Using specific security group: sg-0790ac0a83cfc4b55")
                     
-                    # Get a public subnet
-                    public_subnets = []
-                    for subnet in default_vpc.subnets.all():
-                        # Check if subnet has route to internet gateway
-                        for route in subnet.route_table.routes:
-                            if route.gateway_id and route.gateway_id.startswith('igw-'):
-                                public_subnets.append(subnet.id)
-                                break
-                
-                    if public_subnets:
-                        launch_params['SubnetId'] = public_subnets[0]
-                        logging.info(f"[Backup] Using public subnet: {public_subnets[0]}")
+                    # Set the specific subnet
+                    launch_params['SubnetId'] = 'subnet-0abdea8c046e3b4ca'
+                    logging.info(f"[Backup] Using specific subnet: subnet-0abdea8c046e3b4ca")
+                    
+                    # Note the VPC for reference
+                    logging.info(f"[Backup] VPC: vpc-02ca01805beb89dde")
                 except Exception as e:
-                    logging.error(f"[Backup] Error setting up default network: {e}")
+                    logging.error(f"[Backup] Error setting up specific network: {e}")
                 
                 # Try to find or create a suitable IAM role
                 try:
