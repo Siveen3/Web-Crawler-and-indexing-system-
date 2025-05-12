@@ -184,7 +184,7 @@ class MasterNode:
                     url = body.get('url')
                     domain = body.get('domain')
                     depth = 0
-                    max_depth = min(body.get('depth', 0), self.max_depth)
+                    max_depth = min(body.get('max_depth', 0), self.max_depth)
                     assigned_at = datetime.now(timezone.utc).isoformat()
                     
                     # Record in task table
@@ -225,7 +225,7 @@ class MasterNode:
         for item in response['Items']:
             crawler_id = item['crawler_id']
             shutdown_message = {
-                "shutdown": True,
+                'status': 'shutdown',
                 "crawler_id": crawler_id
             }
             self.sqs.send_message(
@@ -286,7 +286,7 @@ class MasterNode:
         try:
             # Handle both string and list results
             if isinstance(result_json_str, str):
-            result_json = json.loads(result_json_str)
+                result_json = json.loads(result_json_str)
             else:
                 result_json = result_json_str  # Already a Python object (list/dict)
                 
@@ -367,7 +367,7 @@ class MasterNode:
                     ExpressionAttributeValues={":s": "failed"}
                 )
                 if node_type == 'crawler':
-                self.handle_failed_crawler(item)
+                    self.handle_failed_crawler(item)
             else:
                 logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago).")
 
@@ -537,7 +537,6 @@ class MasterNode:
                                 response = self.task_table.get_item(Key={'url': crawled_url})
                                 retries = response.get('Item', {}).get('retries', 0)
                                 if retries < 3:
-                                    self.send_url_to_crawl_queue(crawled_url, domain, depth=depth, max_depth=max_depth)
                                     self.task_table.update_item(
                                         Key={'url': crawled_url},
                                         UpdateExpression="SET retries = :r, assigned_at = :t",
@@ -546,6 +545,8 @@ class MasterNode:
                                             ":t": datetime.now(timezone.utc).isoformat()
                                         }
                                     )
+                                    self.send_url_to_crawl_queue(crawled_url, domain, depth=depth, max_depth=max_depth)
+                                   
                                 else:
                                     self.send_to_dead_letter_queue(crawled_url, reason=error)
                                     self.task_table.update_item(
@@ -597,6 +598,7 @@ class MasterNode:
             retries = item.get('retries', 0)
             url = item.get('url')
             depth = item.get('depth')
+            max_depth = item.get('max_depth', self.max_depth)
             domain = item.get('domain', None)
 
             if (now - datetime.fromisoformat(assigned_at)).total_seconds() > self.TIMEOUT_SECONDS:
@@ -704,8 +706,8 @@ class MasterNode:
             return
 
         shutdown_message = {
-            "shutdown": True,
-            "crawler_id": crawler_id
+            'status': 'shutdown',
+            'crawler_id': crawler_id
         }
         self.sqs.send_message(
             QueueUrl=self.crawl_queue_url,
@@ -815,6 +817,8 @@ class MasterNode:
                 })
             )
             logging.info("[Dashboard] Sent metrics to queue")
+            logging.info(f"[Dashboard] Metrics: {metrics}")
+
         except Exception as e:
             logging.error(f"[Dashboard] Failed to send metrics: {str(e)}")
 
@@ -1059,6 +1063,7 @@ class MasterNode:
         """
         start_time = time.time()
         while time.time() - start_time < timeout:
+            # First check EC2 instances
             ec2 = boto3.client('ec2', region_name=self.region_name)
             response = ec2.describe_instances(
                 Filters=[
@@ -1073,25 +1078,24 @@ class MasterNode:
                 ]
             )
             
-            running_count = 0
             running_instances = []
             for reservation in response['Reservations']:
                 for instance in reservation['Instances']:
-                    running_count += 1
                     running_instances.append(instance['InstanceId'])
-                
-            if running_count >= expected_count:
-                logging.info(f"[Startup] All {expected_count} crawlers are now running")
+            
+            # Then check heartbeat table
+            heartbeat_response = self.heartbeat_table.scan()
+            registered_crawlers = [item for item in heartbeat_response['Items'] 
+                                 if item.get('status') == 'running']
+            
+            running_count = len(registered_crawlers)
+            if running_count >= expected_count and len(running_instances) >= expected_count:
+                logging.info(f"[Startup] All {expected_count} crawlers are now running and registered")
                 
                 if shutdown_after_start:
-                    # Get the heartbeat table to find crawler IDs
-                    heartbeat_response = self.heartbeat_table.scan()
-                    running_crawlers = [item for item in heartbeat_response['Items'] 
-                                     if item.get('status') == 'running']
-                    
-                    if running_crawlers:
+                    if registered_crawlers:
                         # Shutdown the first running crawler
-                        crawler_to_shutdown = running_crawlers[0]
+                        crawler_to_shutdown = registered_crawlers[0]
                         crawler_id = crawler_to_shutdown['crawler_id']
                         logging.info(f"[Startup] Shutting down crawler {crawler_id}")
                         
@@ -1106,10 +1110,10 @@ class MasterNode:
                 
                 return True
                 
-            logging.info(f"[Startup] Waiting for crawlers to start... ({running_count}/{expected_count} running)")
+            logging.info(f"[Startup] Waiting for crawlers to start and register... (EC2: {len(running_instances)}, Registered: {running_count}/{expected_count})")
             time.sleep(10)  # Check every 10 seconds
             
-        logging.error(f"[Startup] Timeout waiting for crawlers to start. Only {running_count}/{expected_count} running")
+        logging.error(f"[Startup] Timeout waiting for crawlers to start. EC2: {len(running_instances)}, Registered: {running_count}/{expected_count}")
         return False
 
 #!Option 2: Use an AMI (Amazon Machine Image)
@@ -1156,12 +1160,7 @@ if __name__ == "__main__":
             
             # Send shutdown signal and update status
             master.send_shutdown_signal_to_crawler(crawler_id)
-            master.heartbeat_table.update_item(
-                Key={'crawler_id': crawler_id},
-                UpdateExpression="SET #s = :s",
-                ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={":s": "shutdown"}
-            )
+            
     else:
         logging.error("[Startup] Failed to start all crawlers")
 
