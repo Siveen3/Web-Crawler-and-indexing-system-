@@ -432,11 +432,28 @@ class MasterNode:
             # Generate a unique ID for this crawler
             crawler_id = f"crawler-{str(uuid.uuid4())[:8]}"
             
-            # Fixed UserData script with proper formatting and unique crawler ID
+            # Fixed UserData script with proper paths and improved initialization
             user_data_script = f"""#!/bin/bash
-cd /home/ubuntu
-# Activate virtual environment
-source crawler-venv/bin/activate
+# Navigate to the home directory
+cd ~
+# Log startup for debugging
+echo "Starting crawler initialization: $(date)" > startup.log
+
+# Activate virtual environment if it exists in current directory
+if [ -d "crawler-venv" ]; then
+    source crawler-venv/bin/activate
+    echo "Activated virtual environment at ~/crawler-venv" >> startup.log
+elif [ -d "/home/ubuntu/crawler-venv" ]; then
+    source /home/ubuntu/crawler-venv/bin/activate
+    echo "Activated virtual environment at /home/ubuntu/crawler-venv" >> startup.log
+else
+    echo "WARNING: crawler-venv not found in expected locations" >> startup.log
+fi
+
+# Verify Python and boto3 are available
+which python >> startup.log
+python -c "import boto3; print('boto3 version:', boto3.__version__)" >> startup.log 2>&1
+
 # Set environment variables with unique crawler ID
 export CRAWLER_ID="{crawler_id}"
 export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
@@ -446,8 +463,32 @@ export S3_BUCKET="crawler-indexer-buckets"
 export DYNAMODB_TABLE="CrawlerHeartbeatTable"
 export AWS_REGION="us-east-1"
 export CRAWLER_DELAY="10"
+
+# Find crawler_object.py
+if [ -f "crawler_object.py" ]; then
+    CRAWLER_SCRIPT="./crawler_object.py"
+    echo "Found crawler_object.py in current directory" >> startup.log
+elif [ -f "/home/ubuntu/crawler_object.py" ]; then
+    CRAWLER_SCRIPT="/home/ubuntu/crawler_object.py"
+    echo "Found crawler_object.py in /home/ubuntu" >> startup.log
+else
+    echo "ERROR: crawler_object.py not found in expected locations" >> startup.log
+    find ~ -name "crawler_object.py" >> startup.log 2>&1
+    exit 1
+fi
+
 # Run the crawler
-python crawler_object.py > /home/ubuntu/crawler_{crawler_id}.log 2>&1
+echo "Starting crawler with command: python $CRAWLER_SCRIPT" >> startup.log
+python $CRAWLER_SCRIPT > ~/crawler_{crawler_id}.log 2>&1 &
+
+# Add a hook to ensure crawler is running
+sleep 10
+if pgrep -f "python.*crawler_object.py"; then
+    echo "Crawler is running successfully" >> startup.log
+else
+    echo "WARNING: Crawler does not appear to be running after 10 seconds" >> startup.log
+    ps aux | grep python >> startup.log
+fi
 """
             
             # Launch instance from AMI
