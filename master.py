@@ -1051,44 +1051,58 @@ class MasterNode:
 
 
     def wait_for_crawlers_to_start(self, expected_count=3, timeout=300, shutdown_after_start=False):
-        """Wait for crawlers to be in running state and optionally shutdown one
-        
-        Args:
-            expected_count (int): Number of crawlers to wait for
-            timeout (int): Maximum time to wait in seconds
-            shutdown_after_start (bool): If True, shutdown one crawler after all are running
-            
-        Returns:
-            bool: True if all crawlers are running, False if timeout
-        """
+        """Wait for crawlers to be in running state and optionally shutdown one"""
         start_time = time.time()
         while time.time() - start_time < timeout:
             # First check EC2 instances
             ec2 = boto3.client('ec2', region_name=self.region_name)
-            response = ec2.describe_instances(
-                Filters=[
-                    {
-                        'Name': 'tag:Name',
-                        'Values': ['CrawlerNode']
-                    },
-                    {
-                        'Name': 'instance-state-name',
-                        'Values': ['running']  # Only count running instances
-                    }
-                ]
-            )
-            
-            running_instances = []
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    running_instances.append(instance['InstanceId'])
+            try:
+                response = ec2.describe_instances(
+                    Filters=[
+                        {
+                            'Name': 'tag:Name',
+                            'Values': ['CrawlerNode']
+                        },
+                        {
+                            'Name': 'instance-state-name',
+                            'Values': ['running', 'pending']  # Also check pending instances
+                        }
+                    ]
+                )
+                
+                running_instances = []
+                pending_instances = []
+                for reservation in response['Reservations']:
+                    for instance in reservation['Instances']:
+                        if instance['State']['Name'] == 'running':
+                            running_instances.append(instance['InstanceId'])
+                        elif instance['State']['Name'] == 'pending':
+                            pending_instances.append(instance['InstanceId'])
+                
+                logging.info(f"[Startup] EC2 Status - Running: {len(running_instances)}, Pending: {len(pending_instances)}")
+                if pending_instances:
+                    logging.info(f"[Startup] Pending instances: {pending_instances}")
+            except Exception as e:
+                logging.error(f"[Startup] Error checking EC2 instances: {e}")
+                running_instances = []
+                pending_instances = []
             
             # Then check heartbeat table
-            heartbeat_response = self.heartbeat_table.scan()
-            registered_crawlers = [item for item in heartbeat_response['Items'] 
-                                 if item.get('status') == 'running']
+            try:
+                heartbeat_response = self.heartbeat_table.scan()
+                registered_crawlers = [item for item in heartbeat_response['Items'] 
+                                     if item.get('status') == 'running']
+                other_status_crawlers = [item for item in heartbeat_response['Items'] 
+                                       if item.get('status') != 'running']
+                
+                running_count = len(registered_crawlers)
+                logging.info(f"[Startup] Heartbeat Status - Running: {running_count}, Other status: {len(other_status_crawlers)}")
+                if other_status_crawlers:
+                    logging.info(f"[Startup] Other status crawlers: {[(item['crawler_id'], item.get('status')) for item in other_status_crawlers]}")
+            except Exception as e:
+                logging.error(f"[Startup] Error checking heartbeat table: {e}")
+                running_count = 0
             
-            running_count = len(registered_crawlers)
             if running_count >= expected_count and len(running_instances) >= expected_count:
                 logging.info(f"[Startup] All {expected_count} crawlers are now running and registered")
                 
@@ -1110,10 +1124,11 @@ class MasterNode:
                 
                 return True
                 
-            logging.info(f"[Startup] Waiting for crawlers to start and register... (EC2: {len(running_instances)}, Registered: {running_count}/{expected_count})")
-            time.sleep(10)  # Check every 10 seconds
+            elapsed = time.time() - start_time
+            logging.info(f"[Startup] Waiting for crawlers to start and register... (Elapsed: {int(elapsed)}s, EC2: {len(running_instances)}, Registered: {running_count}/{expected_count})")
+            time.sleep(10)
             
-        logging.error(f"[Startup] Timeout waiting for crawlers to start. EC2: {len(running_instances)}, Registered: {running_count}/{expected_count}")
+        logging.error(f"[Startup] Timeout waiting for crawlers to start after {timeout}s. Final status - EC2: {len(running_instances)}, Registered: {running_count}/{expected_count}")
         return False
 
 #!Option 2: Use an AMI (Amazon Machine Image)
@@ -1166,4 +1181,3 @@ if __name__ == "__main__":
 
     # Then start monitoring
     logging.info("[Master] Starting comprehensive monitoring...")
-    master.monitor_crawl_queue()
