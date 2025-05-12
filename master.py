@@ -4,6 +4,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
+import uuid
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, o):
@@ -428,6 +429,27 @@ class MasterNode:
             latest_ami = sorted(response['Images'], key=lambda x: x['CreationDate'], reverse=True)[0]
             ami_id = latest_ami['ImageId']
             
+            # Generate a unique ID for this crawler
+            crawler_id = f"crawler-{str(uuid.uuid4())[:8]}"
+            
+            # Fixed UserData script with proper formatting and unique crawler ID
+            user_data_script = f"""#!/bin/bash
+cd /home/ubuntu
+# Activate virtual environment
+source crawler-venv/bin/activate
+# Set environment variables with unique crawler ID
+export CRAWLER_ID="{crawler_id}"
+export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
+export MASTER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue"
+export INDEXER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/IndexQueue"
+export S3_BUCKET="crawler-indexer-buckets"
+export DYNAMODB_TABLE="CrawlerHeartbeatTable"
+export AWS_REGION="us-east-1"
+export CRAWLER_DELAY="10"
+# Run the crawler
+python crawler_object.py > /home/ubuntu/crawler_{crawler_id}.log 2>&1
+"""
+            
             # Launch instance from AMI
             response = ec2.run_instances(
                 ImageId=ami_id,
@@ -441,34 +463,24 @@ class MasterNode:
                             {
                                 'Key': 'Name',
                                 'Value': 'CrawlerNode'
+                            },
+                            {
+                                'Key': 'CrawlerId',
+                                'Value': crawler_id
                             }
                         ]
                     }
                 ],
-                UserData='''#!/bin/bash
-                cd /home/ubuntu
-                # Activate virtual environment
-                source crawler-venv/bin/activate
-                # Set environment variables
-                export CRAWLER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/CrawlQueue"
-                export MASTER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/ReportQueue"
-                export INDEXER_QUEUE_URL="https://sqs.us-east-1.amazonaws.com/353176954707/IndexQueue"
-                export S3_BUCKET="crawler-indexer-buckets"
-                export DYNAMODB_TABLE="CrawlerHeartbeatTable"
-                export AWS_REGION="us-east-1"
-                export CRAWLER_DELAY="10"
-                # Run the crawler
-                python crawler_object.py
-                '''
+                UserData=user_data_script
             )
             
             instance_id = response['Instances'][0]['InstanceId']
-            logging.info(f"[Recovery] Starting backup crawler node with instance ID: {instance_id}")
+            logging.info(f"[Recovery] Starting backup crawler node {crawler_id} with instance ID: {instance_id}")
             
             # Wait for the instance to be running
             waiter = ec2.get_waiter('instance_running')
             waiter.wait(InstanceIds=[instance_id])
-            logging.info(f"[Recovery] Backup crawler node {instance_id} is now running.")
+            logging.info(f"[Recovery] Backup crawler node {crawler_id} (instance {instance_id}) is now running.")
             
         except Exception as e:
             logging.error(f"[Recovery] Failed to start backup crawler: {e}")
@@ -1181,3 +1193,4 @@ if __name__ == "__main__":
 
     # Then start monitoring
     logging.info("[Master] Starting comprehensive monitoring...")
+    master.monitor_crawl_queue()
