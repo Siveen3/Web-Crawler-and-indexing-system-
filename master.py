@@ -651,21 +651,22 @@ fi
 
 # Test AWS credentials and DynamoDB access before starting crawler
 echo "Testing AWS credentials and DynamoDB access..." >> startup.log
-python -c "
-import boto3
+echo "import boto3
 import datetime
+import os
 try:
+    crawler_id = os.environ.get('CRAWLER_ID', 'unknown')
     dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
     table = dynamodb.Table('CrawlerHeartbeatTable')
     response = table.put_item(Item={
-        'crawler_id': 'test-{crawler_id}',
+        'crawler_id': 'test-' + crawler_id,
         'status': 'test',
         'last_heartbeat': datetime.datetime.now().isoformat()
     })
     print('DynamoDB access test: SUCCESS')
 except Exception as e:
     print('DynamoDB access test: FAILED - ' + str(e))
-" >> startup.log 2>&1
+" | python >> startup.log 2>&1
 
 # Run the crawler
 echo "Starting crawler with command: python $CRAWLER_SCRIPT" >> startup.log
