@@ -251,9 +251,15 @@ class Crawler:
 
     def start_crawling(self):
         # Start pulling URLs from the crawler queue.
+        heartbeat()
+        
         while True:
-            # Send a heartbeat at the start of each iteration
-            self.heartbeat()
+            current_time = time.time()
+            
+            # Send heartbeat periodically, regardless of URL processing
+            if current_time - last_heartbeat_time >= heartbeat_interval:
+                self.heartbeat()
+                last_heartbeat_time = current_time
             
             # Check for shutdown request
             if self.shutdown_requested:
@@ -284,7 +290,7 @@ class Crawler:
                 continue
 
             # Check for shutdown signal from master
-            if body.get('status') == 'shutdown'  and body.get('crawler_id') == self.crawler_id:
+            if body.get('status') == 'shutdown' and body.get('crawler_id') == self.crawler_id:
                 if not self.is_shutdown:  # Only handle shutdown if we're not already shutdown
                     self.handle_master_shutdown(receipt_handle)
                 continue
@@ -316,10 +322,11 @@ class Crawler:
                     else:
                         logging.error(f"Failed to upload content to S3 for URL: {url}")
                         self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to upload to S3")
+                        continue
                 else:
                     logging.error(f"Failed to fetch URL: {url}")
                     self.send_to_master(url=url, extracted_urls=[], depth=depth, max_depth=max_depth, status="failed", error="Failed to fetch")
-
+                    continue
             # Delete the processed message from queue
             try:
                 self.sqs.delete_message(
