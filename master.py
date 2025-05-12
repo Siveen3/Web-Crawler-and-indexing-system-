@@ -1097,15 +1097,15 @@ if __name__ == "__main__":
         task_table_name='CrawlerTaskAssignmets',
         dead_letter_queue_url='https://sqs.us-east-1.amazonaws.com/353176954707/DeadLetterQueue',
         blocked_table_name='BlockedUrlsTable',
-        index_feedback_queue_url = 'https://sqs.us-east-1.amazonaws.com/353176954707/FeedbackQueue',
-        request_queue_url= 'https://sqs.us-east-1.amazonaws.com/353176954707/RequestQueue',
-        ResponseQueue= 'https://sqs.us-east-1.amazonaws.com/353176954707/ResponseQueue',
-        search_queue_url = 'https://sqs.us-east-1.amazonaws.com/353176954707/SearchQueue',
-        index_status_table_name = 'IndexerTaskAssignments',
-        indexer_heartbeat_table_name = 'IndexerHeartbeatTable',
+        index_feedback_queue_url='https://sqs.us-east-1.amazonaws.com/353176954707/FeedbackQueue',
+        request_queue_url='https://sqs.us-east-1.amazonaws.com/353176954707/RequestQueue',
+        ResponseQueue='https://sqs.us-east-1.amazonaws.com/353176954707/ResponseQueue',
+        search_queue_url='https://sqs.us-east-1.amazonaws.com/353176954707/SearchQueue',
+        index_status_table_name='IndexerTaskAssignments',
+        indexer_heartbeat_table_name='IndexerHeartbeatTable',
         max_depth=2)
 
-        # Reset system (starts 2 crawlers)
+    # Reset system (starts 2 crawlers)
     master.reset_system_state()
 
     # Start one more crawler
@@ -1115,7 +1115,5 @@ if __name__ == "__main__":
     master.wait_for_crawlers_to_start(expected_count=3, timeout=300, shutdown_after_start=True)
 
     # Then start monitoring
+    logging.info("[Master] Starting comprehensive monitoring...")
     master.monitor_crawl_queue()
-        logging.info("[Master] Starting comprehensive monitoring...")
-        master.monitor_crawl_queue()
-        ####
