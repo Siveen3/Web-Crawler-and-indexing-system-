@@ -148,15 +148,55 @@ class MasterNode:
 
     def wake_up_crawler(self, crawler_id):
         """Wake up a specific crawler by sending a wake-up signal"""
-        wake_message = {
-            "status": "wake_up",
-            "crawler_id": crawler_id
-        }
-        self.sqs.send_message(
-            QueueUrl=self.crawl_queue_url,
-            MessageBody=json.dumps(wake_message, cls=DecimalEncoder)
-        )
-        logging.info(f"[Master] Sent wake-up signal to {crawler_id}")
+        logging.info(f"[Master] Attempting to wake up crawler {crawler_id}...")
+        
+        try:
+            # First check if the crawler exists in the heartbeat table
+            response = self.heartbeat_table.get_item(Key={'crawler_id': crawler_id})
+            if 'Item' not in response:
+                logging.error(f"[Master] Crawler {crawler_id} not found in heartbeat table")
+                return False
+                
+            # Check current status
+            current_status = response['Item'].get('status', 'unknown')
+            if current_status not in ['shutdown', 'failed']:
+                logging.info(f"[Master] Crawler {crawler_id} is already in status {current_status}, no need to wake up")
+                return False
+                
+            # Update status to 'waking_up' in the heartbeat table
+            self.heartbeat_table.update_item(
+                Key={'crawler_id': crawler_id},
+                UpdateExpression="SET #s = :s, last_heartbeat = :t",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":s": "waking_up",
+                    ":t": datetime.now(timezone.utc).isoformat()
+                }
+            )
+            
+            # Prepare and send wake-up message
+            wake_message = {
+                "status": "wake_up",
+                "crawler_id": crawler_id,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            self.sqs.send_message(
+                QueueUrl=self.crawl_queue_url,
+                MessageBody=json.dumps(wake_message, cls=DecimalEncoder),
+                MessageAttributes={
+                    'MessageType': {
+                        'DataType': 'String',
+                        'StringValue': 'wake_up'
+                    }
+                }
+            )
+            
+            logging.info(f"[Master] Successfully sent wake-up signal to {crawler_id}")
+            return True
+        except Exception as e:
+            logging.error(f"[Master] Failed to send wake-up signal to {crawler_id}: {str(e)}")
+            return False
 
     def monitor_client_requests(self):
         logging.info("[Monitor] Listening for client requests...")
@@ -358,19 +398,45 @@ class MasterNode:
             node_id = item[f'{node_type}_id']
             last_heartbeat = datetime.fromisoformat(item['last_heartbeat'])
             time_diff = (now - last_heartbeat).total_seconds()
+            current_status = item.get('status', 'unknown')
             
-            if time_diff > 120 and item.get('status') not in ['failed', 'shutdown']:
-                logging.warning(f"[Warning] {node_id} missed heartbeat! Declaring as failed.")
-                table.update_item(
-                    Key={f'{node_type}_id': node_id},
-                    UpdateExpression="SET #s = :s",
-                    ExpressionAttributeNames={"#s": "status"},
-                    ExpressionAttributeValues={":s": "failed"}
-                )
-                if node_type == 'crawler':
-                    self.handle_failed_crawler(item)
+            # Increased timeout to 300 seconds (5 minutes)
+            if time_diff > 300 and current_status not in ['failed', 'shutdown']:
+                logging.warning(f"[Warning] {node_id} missed heartbeat for {int(time_diff)} seconds! Marking as potentially failed.")
+                
+                # First mark as potentially failed, with another chance to recover
+                if current_status != 'potentially_failed':
+                    table.update_item(
+                        Key={f'{node_type}_id': node_id},
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "potentially_failed"}
+                    )
+                    logging.info(f"[Recovery] Marked {node_id} as potentially_failed, will check again before declaring failed")
+                
+                # Only declare as failed if it's been potentially_failed for another cycle
+                elif current_status == 'potentially_failed' and time_diff > 450:  # 7.5 minutes total
+                    logging.warning(f"[Warning] {node_id} confirmed failed after {int(time_diff)} seconds with no heartbeat.")
+                    table.update_item(
+                        Key={f'{node_type}_id': node_id},
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "failed"}
+                    )
+                    if node_type == 'crawler':
+                        self.handle_failed_crawler(item)
             else:
-                logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago).")
+                if current_status == 'potentially_failed' and time_diff <= 300:
+                    # Node recovered - mark it as running again
+                    table.update_item(
+                        Key={f'{node_type}_id': node_id},
+                        UpdateExpression="SET #s = :s",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={":s": "running"}
+                    )
+                    logging.info(f"[Recovery] {node_id} recovered from potentially_failed state!")
+                
+                logging.info(f"[Info] {node_id} is alive (last seen {int(time_diff)} seconds ago, status: {current_status}).")
 
     def monitor_crawlers_health(self):
         """Monitor the health of crawler nodes"""
@@ -382,6 +448,9 @@ class MasterNode:
 
     def handle_failed_crawler(self, crawler_item):
         failed_task_url = crawler_item.get('current_task_url')
+        failed_crawler_id = crawler_item.get('crawler_id')
+        logging.info(f"[Recovery] Handling failed crawler: {failed_crawler_id}")
+        
         if failed_task_url:
             # Check if the task is still pending and not already failed/timed out
             task = self.task_table.get_item(Key={'url': failed_task_url}).get('Item')
@@ -397,15 +466,42 @@ class MasterNode:
 
         # Check for shutdown crawlers
         response = self.heartbeat_table.scan()
-        shutdown_crawlers = [item['crawler_id'] for item in response['Items'] if item.get('status') == 'shutdown']
-
-        if not shutdown_crawlers:
-            logging.info("[Recovery] No shutdown crawlers found. Starting a new EC2 instance.")
+        shutdown_crawlers = [item for item in response['Items'] if item.get('status') == 'shutdown']
+        
+        # If we have shutdown crawlers, try to wake one up
+        if shutdown_crawlers:
+            # Sort by last heartbeat time to get the most recently active shutdown crawler
+            shutdown_crawlers.sort(key=lambda x: x.get('last_heartbeat', ''), reverse=True)
+            for shutdown_crawler in shutdown_crawlers:
+                crawler_id = shutdown_crawler['crawler_id']
+                logging.info(f"[Recovery] Attempting to wake up shutdown crawler: {crawler_id}")
+                
+                # Try to wake up this crawler
+                try:
+                    self.wake_up_crawler(crawler_id)
+                    
+                    # Mark it as recovering in the heartbeat table
+                    self.heartbeat_table.update_item(
+                        Key={'crawler_id': crawler_id},
+                        UpdateExpression="SET #s = :s, last_heartbeat = :t",
+                        ExpressionAttributeNames={"#s": "status"},
+                        ExpressionAttributeValues={
+                            ":s": "recovering",
+                            ":t": datetime.now(timezone.utc).isoformat()
+                        }
+                    )
+                    logging.info(f"[Recovery] Successfully sent wake-up signal to {crawler_id}")
+                    return  # Exit after successfully waking one crawler
+                except Exception as e:
+                    logging.error(f"[Recovery] Failed to wake up crawler {crawler_id}: {e}")
+                    continue  # Try the next crawler
+            
+            # If we couldn't wake up any existing crawler, start a new one
+            logging.info("[Recovery] Could not wake up any shutdown crawler. Starting a new one.")
             self.start_backup_crawler()
         else:
-            crawler_id = shutdown_crawlers[0]
-            logging.info(f"[Recovery] Waking up shutdown crawler: {crawler_id}")
-            self.wake_up_crawler(crawler_id)
+            logging.info("[Recovery] No shutdown crawlers found. Starting a new EC2 instance.")
+            self.start_backup_crawler()
 
     def start_backup_crawler(self):
         """Start a new crawler instance from the AMI"""
@@ -783,7 +879,7 @@ done
                             try:
                                 # Add check to ensure crawled_url is not None or empty
                                 if not crawled_url:
-                                    logging.error(f"[{crawler_id}] Cannot process failed crawl: URL is None or empty")
+                                    logging.error(f"[Recovery] Cannot process failed crawl: URL is None or empty")
                                     continue
                                 
                                 response = self.task_table.get_item(Key={'url': crawled_url})
@@ -1302,7 +1398,7 @@ done
             logging.error(f"[Verify] Failed to check EC2 instances: {str(e)}")
 
 
-    def wait_for_crawlers_to_start(self, expected_count=3, timeout=300, shutdown_after_start=False):
+    def wait_for_crawlers_to_start(self, expected_count=3, timeout=600, shutdown_after_start=False):
         """Wait for crawlers to be in running state and optionally shutdown one"""
         start_time = time.time()
         while time.time() - start_time < timeout:
@@ -1343,12 +1439,23 @@ done
             try:
                 heartbeat_response = self.heartbeat_table.scan()
                 registered_crawlers = [item for item in heartbeat_response['Items'] 
-                                     if item.get('status') == 'running']
+                                     if item.get('status') in ['running', 'potentially_failed']]  # Include potentially_failed
                 other_status_crawlers = [item for item in heartbeat_response['Items'] 
-                                       if item.get('status') != 'running']
+                                       if item.get('status') not in ['running', 'potentially_failed']]
                 
                 running_count = len(registered_crawlers)
-                logging.info(f"[Startup] Heartbeat Status - Running: {running_count}, Other status: {len(other_status_crawlers)}")
+                logging.info(f"[Startup] Heartbeat Status - Running/Potentially Failed: {running_count}, Other status: {len(other_status_crawlers)}")
+                
+                # If we have instances running but not registered correctly, try to nudge them
+                if len(running_instances) > running_count:
+                    logging.info(f"[Startup] Found {len(running_instances)} instances but only {running_count} registered crawlers. Sending wake-up signals...")
+                    # Try to find any crawlers in shutdown status that we can wake up
+                    shutdown_crawlers = [item['crawler_id'] for item in heartbeat_response['Items'] 
+                                       if item.get('status') == 'shutdown']
+                    for crawler_id in shutdown_crawlers:
+                        self.wake_up_crawler(crawler_id)
+                        logging.info(f"[Startup] Sent wake-up signal to {crawler_id}")
+                
                 if other_status_crawlers:
                     logging.info(f"[Startup] Other status crawlers: {[(item['crawler_id'], item.get('status')) for item in other_status_crawlers]}")
             except Exception as e:
@@ -1378,10 +1485,17 @@ done
                 
             elapsed = time.time() - start_time
             logging.info(f"[Startup] Waiting for crawlers to start and register... (Elapsed: {int(elapsed)}s, EC2: {len(running_instances)}, Registered: {running_count}/{expected_count})")
-            time.sleep(10)
+            
+            # More frequent checking initially, then back off
+            if elapsed < 60:
+                time.sleep(5)
+            else:
+                time.sleep(10)
             
         logging.error(f"[Startup] Timeout waiting for crawlers to start after {timeout}s. Final status - EC2: {len(running_instances)}, Registered: {running_count}/{expected_count}")
-        return False
+        
+        # Even if we didn't reach the expected count, continue if we have at least one crawler
+        return running_count > 0
 
 #!Option 2: Use an AMI (Amazon Machine Image)
 #!Set up one EC2 instance with everything installed and configured.
